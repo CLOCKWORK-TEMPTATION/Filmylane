@@ -10,6 +10,8 @@ jobs:
   secret-scan:
     name: Scan for Secrets
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     
     steps:
       - name: Checkout code
