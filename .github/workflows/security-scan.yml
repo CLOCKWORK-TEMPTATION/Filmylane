@@ -36,7 +36,8 @@ jobs:
           found=0
           
           for pattern in "${patterns[@]}"; do
-            if git grep -E "$pattern" -- ':!.github/workflows/*' ':!SECURITY.md' ':!*.md' 2>/dev/null; then
+            # Exclude only specific safe files: workflows, .env.example, and SECURITY.md
+            if git grep -E "$pattern" -- ':!.github/workflows/*' ':!.env.example' ':!SECURITY.md' 2>/dev/null; then
               echo "❌ Found potential secret matching pattern: $pattern"
               found=1
             fi
