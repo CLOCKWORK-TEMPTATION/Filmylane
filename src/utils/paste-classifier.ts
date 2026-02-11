@@ -2582,18 +2582,32 @@ export const handlePaste = async (
     previousFormatClass = formatClass;
   }
 
-  const range = selection.getRangeAt(0);
-  range.deleteContents();
-
-  const tempContainer = document.createElement("div");
-  tempContainer.innerHTML = formattedHTML;
-
-  const fragment = document.createDocumentFragment();
-  while (tempContainer.firstChild) {
-    fragment.appendChild(tempContainer.firstChild);
+  let insertedWithNativeUndo: boolean;
+  try {
+    insertedWithNativeUndo = document.execCommand(
+      "insertHTML",
+      false,
+      formattedHTML
+    );
+  } catch {
+    insertedWithNativeUndo = false;
   }
 
-  range.insertNode(fragment);
+  if (!insertedWithNativeUndo) {
+    const range = selection.getRangeAt(0);
+    range.deleteContents();
+
+    const tempContainer = document.createElement("div");
+    tempContainer.innerHTML = formattedHTML;
+
+    const fragment = document.createDocumentFragment();
+    while (tempContainer.firstChild) {
+      fragment.appendChild(tempContainer.firstChild);
+    }
+
+    range.insertNode(fragment);
+  }
+
   selection.removeAllRanges();
 
   const newRange = document.createRange();

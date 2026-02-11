@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef, useCallback } from "react";
+import React, { useState, useRef, useCallback, useEffect } from "react";
 import {
   IconInfoCircle,
   IconList,
@@ -35,10 +35,11 @@ import {
   IconSeparator,
   IconWand,
   IconFileExport,
+  IconPrinter,
   IconKeyboard,
   IconHelp,
 } from "@tabler/icons-react";
-import { cn, exportToPDF, openTextFile, saveTextFile } from "@/utils";
+import { cn, exportToDocx, exportToPDF, openTextFile } from "@/utils";
 import { motion, AnimatePresence } from "motion/react";
 import { screenplayFormats } from "@/constants";
 import { EditorArea, EditorHandle } from "./EditorArea";
@@ -52,10 +53,12 @@ import type { DocumentStats } from "@/types/screenplay";
 function DockIcon({
   icon: Icon,
   onClick,
+  onMouseDown,
   active = false,
 }: {
   icon: React.ElementType;
   onClick?: () => void;
+  onMouseDown?: (e: React.MouseEvent<HTMLButtonElement>) => void;
   active?: boolean;
 }) {
   return (
@@ -63,6 +66,7 @@ function DockIcon({
       <HoverBorderGradient
         as="button"
         onClick={onClick}
+        onMouseDown={onMouseDown}
         containerClassName="h-full w-full rounded-full"
         className={cn(
           "flex h-full w-full items-center justify-center p-0 transition-all duration-200",
@@ -162,6 +166,8 @@ type MenuActionId =
   | "new-file"
   | "open-file"
   | "save-file"
+  | "save-as-file"
+  | "print-file"
   | "export-pdf"
   | "undo"
   | "redo"
@@ -197,6 +203,8 @@ export const ScreenplayEditor = () => {
   });
 
   const editorRef = useRef<EditorHandle>(null);
+  const preservedSelectionRef = useRef<Range | null>(null);
+  const shortcutActionRef = useRef<(actionId: MenuActionId) => void>(() => {});
   const { toast } = useToast();
 
   const toggleMenu = (id: string) => {
@@ -211,6 +219,124 @@ export const ScreenplayEditor = () => {
   const handleFormatChange = useCallback(
     (format: string) => setCurrentFormat(format),
     []
+  );
+
+  const ensureDocxFilename = useCallback((name: string) => {
+    const trimmedName = name.trim();
+    if (!trimmedName) return "";
+    const sanitizedBase = trimmedName.replace(/[<>:"/\\|?*]+/g, "_");
+    if (!sanitizedBase.toLowerCase().endsWith(".docx")) {
+      return `${sanitizedBase}.docx`;
+    }
+    return sanitizedBase;
+  }, []);
+
+  const getEditorContentForExport = useCallback(() => {
+    const htmlContent = editorRef.current?.getAllHtml() ?? "";
+    if (!htmlContent.trim()) {
+      toast({
+        title: "خطأ",
+        description: "لا يوجد محتوى للحفظ أو الطباعة. اكتب شيئاً أولاً.",
+        variant: "destructive",
+      });
+      return null;
+    }
+    return htmlContent;
+  }, [toast]);
+
+  const captureEditorSelection = useCallback(() => {
+    const editorElement = editorRef.current?.getElement();
+    const selection = window.getSelection();
+    if (!editorElement || !selection || selection.rangeCount === 0) {
+      preservedSelectionRef.current = null;
+      return;
+    }
+
+    const range = selection.getRangeAt(0);
+    if (!editorElement.contains(range.commonAncestorContainer)) {
+      preservedSelectionRef.current = null;
+      return;
+    }
+
+    preservedSelectionRef.current = range.cloneRange();
+  }, []);
+
+  const isSelectionInsideEditor = useCallback(() => {
+    const editorElement = editorRef.current?.getElement();
+    const selection = window.getSelection();
+    if (!editorElement || !selection || selection.rangeCount === 0) {
+      return false;
+    }
+    const range = selection.getRangeAt(0);
+    return editorElement.contains(range.commonAncestorContainer);
+  }, []);
+
+  const restoreEditorSelection = useCallback(() => {
+    const editorElement = editorRef.current?.getElement();
+    const savedRange = preservedSelectionRef.current;
+    const selection = window.getSelection();
+
+    if (!editorElement || !savedRange || !selection) {
+      return false;
+    }
+
+    try {
+      if (!editorElement.contains(savedRange.commonAncestorContainer)) {
+        return false;
+      }
+      selection.removeAllRanges();
+      selection.addRange(savedRange.cloneRange());
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  useEffect(() => {
+    const handleSelectionChange = () => {
+      captureEditorSelection();
+    };
+
+    document.addEventListener("selectionchange", handleSelectionChange);
+    return () => {
+      document.removeEventListener("selectionchange", handleSelectionChange);
+    };
+  }, [captureEditorSelection]);
+
+  const ensureEditorFocus = useCallback(() => {
+    if (isSelectionInsideEditor()) return true;
+    if (restoreEditorSelection()) return true;
+    editorRef.current?.focusEditor();
+    captureEditorSelection();
+    return true;
+  }, [captureEditorSelection, isSelectionInsideEditor, restoreEditorSelection]);
+
+  const executeEditorCommand = useCallback(
+    (command: string, value?: string) => {
+      ensureEditorFocus();
+      document.execCommand(command, false, value);
+      captureEditorSelection();
+    },
+    [captureEditorSelection, ensureEditorFocus]
+  );
+
+  const hasNonCollapsedSelectionInEditor = useCallback(() => {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return false;
+    const range = selection.getRangeAt(0);
+    if (!range.collapsed && isSelectionInsideEditor()) {
+      return true;
+    }
+    const savedRange = preservedSelectionRef.current;
+    return Boolean(savedRange && !savedRange.collapsed);
+  }, [isSelectionInsideEditor]);
+
+  const handlePreserveSelectionMouseDown = useCallback(
+    (e: React.MouseEvent<HTMLElement>) => {
+      e.preventDefault();
+      captureEditorSelection();
+    },
+    [captureEditorSelection]
   );
 
   // ============ FILE OPERATIONS ============
@@ -241,110 +367,159 @@ export const ScreenplayEditor = () => {
   };
 
   const handleSaveFile = () => {
-    const content = editorRef.current?.getAllText() || "";
-    saveTextFile(content, "screenplay.txt", "text/plain;charset=utf-8");
-    toast({ title: "تم الحفظ", description: "تم حفظ الملف بنجاح" });
+    const content = getEditorContentForExport();
+    if (!content) {
+      setActiveMenu(null);
+      return;
+    }
+
+    exportToDocx(content, "screenplay.docx");
+    toast({
+      title: "تم الحفظ",
+      description: "تم حفظ الملف بصيغة DOCX مع التنسيق",
+    });
+    setActiveMenu(null);
+  };
+
+  const handleSaveAsFile = () => {
+    const content = getEditorContentForExport();
+    if (!content) {
+      setActiveMenu(null);
+      return;
+    }
+
+    const userInput = window.prompt("اكتب اسم الملف", "screenplay.docx");
+    if (userInput === null) {
+      setActiveMenu(null);
+      return;
+    }
+
+    const filename = ensureDocxFilename(userInput);
+    if (!filename) {
+      toast({
+        title: "اسم غير صالح",
+        description: "الرجاء إدخال اسم ملف صحيح.",
+        variant: "destructive",
+      });
+      setActiveMenu(null);
+      return;
+    }
+
+    exportToDocx(content, filename);
+    toast({
+      title: "تم الحفظ باسم",
+      description: `تم حفظ الملف: ${filename}`,
+    });
+    setActiveMenu(null);
+  };
+
+  const handlePrintFile = async () => {
+    const content = getEditorContentForExport();
+    if (!content) {
+      setActiveMenu(null);
+      return;
+    }
+
+    toast({ title: "جاري الطباعة", description: "جاري فتح نافذة الطباعة..." });
+    await exportToPDF(content, "سيناريو");
     setActiveMenu(null);
   };
 
   const handleExportPDF = async () => {
-    const editorElement = editorRef.current?.getElement();
-
-    if (!editorElement) {
-      toast({
-        title: "خطأ",
-        description: "لا يوجد محتوى للتصدير",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    // Get all content from screenplay bodies
-    const bodies = editorElement.querySelectorAll(".screenplay-sheet__body");
-
-    let allContent = "";
-    bodies.forEach((body) => {
-      const content = body.innerHTML;
-      if (content && content.trim() && content !== "<br>") {
-        allContent += content;
-      }
-    });
-
-    if (!allContent.trim()) {
-      toast({
-        title: "خطأ",
-        description: "لا يوجد محتوى للتصدير. اكتب شيئاً في المحرر أولاً.",
-        variant: "destructive",
-      });
+    const content = getEditorContentForExport();
+    if (!content) {
       return;
     }
 
     toast({ title: "جاري التصدير", description: "جاري فتح نافذة الطباعة..." });
 
     // Use the unified exportToPDF with Arabic RTL support
-    await exportToPDF(allContent, "سيناريو");
+    await exportToPDF(content, "سيناريو");
 
     setActiveMenu(null);
   };
 
   // ============ EDIT OPERATIONS ============
   const handleUndo = () => {
-    document.execCommand("undo");
-    editorRef.current?.getElement()?.focus();
+    executeEditorCommand("undo");
+    setActiveMenu(null);
   };
 
   const handleRedo = () => {
-    document.execCommand("redo");
-    editorRef.current?.getElement()?.focus();
+    executeEditorCommand("redo");
+    setActiveMenu(null);
   };
 
   const handleCopy = () => {
-    document.execCommand("copy");
+    if (!hasNonCollapsedSelectionInEditor()) {
+      toast({
+        title: "لا يوجد تحديد",
+        description: "حدد نصًا داخل المحرر أولاً.",
+        variant: "destructive",
+      });
+      setActiveMenu(null);
+      return;
+    }
+    executeEditorCommand("copy");
     toast({ title: "تم النسخ", description: "تم نسخ النص المحدد" });
     setActiveMenu(null);
   };
 
   const handleCut = () => {
-    document.execCommand("cut");
+    if (!hasNonCollapsedSelectionInEditor()) {
+      toast({
+        title: "لا يوجد تحديد",
+        description: "حدد نصًا داخل المحرر أولاً.",
+        variant: "destructive",
+      });
+      setActiveMenu(null);
+      return;
+    }
+    executeEditorCommand("cut");
     toast({ title: "تم القص", description: "تم قص النص المحدد" });
     setActiveMenu(null);
   };
 
   const handlePaste = async () => {
-    const text = await navigator.clipboard.readText();
-    document.execCommand("insertText", false, text);
+    ensureEditorFocus();
+    try {
+      const text = await navigator.clipboard.readText();
+      executeEditorCommand("insertText", text);
+      toast({ title: "تم اللصق", description: "تم لصق النص بنجاح" });
+    } catch {
+      toast({
+        title: "فشل اللصق",
+        description: "تعذّر قراءة الحافظة. تحقق من صلاحيات المتصفح.",
+        variant: "destructive",
+      });
+    }
     setActiveMenu(null);
   };
 
   const handleSelectAll = () => {
-    document.execCommand("selectAll");
+    editorRef.current?.selectAllContent();
     setActiveMenu(null);
   };
 
   // ============ FORMAT OPERATIONS ============
   const handleBold = () => {
-    document.execCommand("bold");
-    editorRef.current?.getElement()?.focus();
+    executeEditorCommand("bold");
   };
 
   const handleItalic = () => {
-    document.execCommand("italic");
-    editorRef.current?.getElement()?.focus();
+    executeEditorCommand("italic");
   };
 
   const handleAlignRight = () => {
-    document.execCommand("justifyRight");
-    editorRef.current?.getElement()?.focus();
+    executeEditorCommand("justifyRight");
   };
 
   const handleAlignCenter = () => {
-    document.execCommand("justifyCenter");
-    editorRef.current?.getElement()?.focus();
+    executeEditorCommand("justifyCenter");
   };
 
   const handleAlignLeft = () => {
-    document.execCommand("justifyLeft");
-    editorRef.current?.getElement()?.focus();
+    executeEditorCommand("justifyLeft");
   };
 
   // ============ INSERT OPERATIONS ============
@@ -465,6 +640,12 @@ export const ScreenplayEditor = () => {
       case "save-file":
         handleSaveFile();
         break;
+      case "save-as-file":
+        handleSaveAsFile();
+        break;
+      case "print-file":
+        void handlePrintFile();
+        break;
       case "export-pdf":
         void handleExportPDF();
         break;
@@ -534,6 +715,117 @@ export const ScreenplayEditor = () => {
     }
   };
 
+  // Keep latest action dispatcher for global shortcuts without re-binding listeners.
+  useEffect(() => {
+    shortcutActionRef.current = handleMenuAction;
+  });
+
+  useEffect(() => {
+    const isTextInputOutsideEditor = (target: EventTarget | null): boolean => {
+      if (!(target instanceof HTMLElement)) return false;
+      const editorElement = editorRef.current?.getElement();
+      if (editorElement && editorElement.contains(target)) {
+        return false;
+      }
+      const tag = target.tagName;
+      return (
+        target.isContentEditable ||
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        tag === "SELECT"
+      );
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      if (isTextInputOutsideEditor(e.target)) return;
+
+      const key = e.key.toLowerCase();
+      const withShift = e.shiftKey;
+      const inEditorContext =
+        isSelectionInsideEditor() || Boolean(preservedSelectionRef.current);
+      const runAction = (actionId: MenuActionId) => {
+        shortcutActionRef.current(actionId);
+      };
+
+      if (key === "n") {
+        e.preventDefault();
+        runAction("new-file");
+        return;
+      }
+
+      if (key === "o") {
+        e.preventDefault();
+        runAction("open-file");
+        return;
+      }
+
+      if (key === "s" && withShift) {
+        e.preventDefault();
+        runAction("save-as-file");
+        return;
+      }
+
+      if (key === "s") {
+        e.preventDefault();
+        runAction("save-file");
+        return;
+      }
+
+      if (key === "p") {
+        e.preventDefault();
+        runAction("print-file");
+        return;
+      }
+
+      if (key === "a") {
+        if (!inEditorContext) return;
+        e.preventDefault();
+        runAction("select-all");
+        return;
+      }
+
+      if (key === "z" && withShift) {
+        if (!inEditorContext) return;
+        e.preventDefault();
+        runAction("redo");
+        return;
+      }
+
+      if (key === "z") {
+        if (!inEditorContext) return;
+        e.preventDefault();
+        runAction("undo");
+        return;
+      }
+
+      if (key === "y") {
+        if (!inEditorContext) return;
+        e.preventDefault();
+        runAction("redo");
+        return;
+      }
+
+      if (key === "x") {
+        if (!inEditorContext) return;
+        e.preventDefault();
+        runAction("cut");
+        return;
+      }
+
+      if (key === "c") {
+        if (!inEditorContext) return;
+        e.preventDefault();
+        runAction("copy");
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [isSelectionInsideEditor]);
+
   // ============ MENU DEFINITIONS ============
   const menuItems: Record<
     string,
@@ -543,6 +835,8 @@ export const ScreenplayEditor = () => {
       { label: "مستند جديد", icon: IconFilePlus, actionId: "new-file" },
       { label: "فتح...", icon: IconFolderOpen, actionId: "open-file" },
       { label: "حفظ", icon: IconDeviceFloppy, actionId: "save-file" },
+      { label: "حفظ باسم...", icon: IconDownload, actionId: "save-as-file" },
+      { label: "طباعة", icon: IconPrinter, actionId: "print-file" },
       { label: "تصدير كـ PDF", icon: IconFileExport, actionId: "export-pdf" },
     ],
     تعديل: [
@@ -625,6 +919,7 @@ export const ScreenplayEditor = () => {
                 <div key={menu} className="group relative">
                   <HoverBorderGradient
                     as="button"
+                    onMouseDown={handlePreserveSelectionMouseDown}
                     onClick={() => toggleMenu(menu)}
                     containerClassName="rounded-full"
                     className={cn(
@@ -668,6 +963,7 @@ export const ScreenplayEditor = () => {
                         {menuItems[menu]?.map((item, idx) => (
                           <motion.button
                             key={idx}
+                            onMouseDown={handlePreserveSelectionMouseDown}
                             onClick={() => handleMenuAction(item.actionId)}
                             initial={{ x: -10, opacity: 0 }}
                             animate={{ x: 0, opacity: 1 }}
@@ -765,9 +1061,9 @@ export const ScreenplayEditor = () => {
                 icon={IconFileText}
                 label="المستندات الأخيرة"
                 items={[
-                  "سيناريو فيلم.txt",
-                  "مسودة الحلقة 1.txt",
-                  "ملاحظات المخرج.txt",
+                  "سيناريو فيلم.docx",
+                  "مسودة الحلقة 1.docx",
+                  "ملاحظات المخرج.docx",
                 ]}
                 isOpen={openSidebarItem === "docs"}
                 onToggle={() =>
@@ -848,6 +1144,7 @@ export const ScreenplayEditor = () => {
                 {/* Group 1: Media/Export */}
                 <DockIcon
                   icon={IconMovie}
+                  onMouseDown={handlePreserveSelectionMouseDown}
                   onClick={() =>
                     toast({
                       title: "معاينة",
@@ -855,22 +1152,32 @@ export const ScreenplayEditor = () => {
                     })
                   }
                 />
-                <DockIcon icon={IconDownload} onClick={handleExportPDF} />
+                <DockIcon
+                  icon={IconDownload}
+                  onMouseDown={handlePreserveSelectionMouseDown}
+                  onClick={handleExportPDF}
+                />
 
                 <div className="mx-2 mb-4 h-5 w-[1px] bg-gradient-to-b from-transparent via-neutral-600/50 to-transparent" />
 
                 {/* Group 2: Tools */}
                 <DockIcon
                   icon={IconStethoscope}
+                  onMouseDown={handlePreserveSelectionMouseDown}
                   onClick={handleScriptAnalysis}
                 />
-                <DockIcon icon={IconBulb} onClick={handleAISuggestions} />
+                <DockIcon
+                  icon={IconBulb}
+                  onMouseDown={handlePreserveSelectionMouseDown}
+                  onClick={handleAISuggestions}
+                />
 
                 <div className="mx-2 mb-4 h-5 w-[1px] bg-gradient-to-b from-transparent via-neutral-600/50 to-transparent" />
 
                 {/* Group 3: Actions */}
                 <DockIcon
                   icon={IconMessage}
+                  onMouseDown={handlePreserveSelectionMouseDown}
                   onClick={() =>
                     toast({
                       title: "الملاحظات",
@@ -880,6 +1187,7 @@ export const ScreenplayEditor = () => {
                 />
                 <DockIcon
                   icon={IconHistory}
+                  onMouseDown={handlePreserveSelectionMouseDown}
                   onClick={() =>
                     toast({
                       title: "السجل",
@@ -887,23 +1195,59 @@ export const ScreenplayEditor = () => {
                     })
                   }
                 />
-                <DockIcon icon={IconUpload} onClick={handleOpenFile} />
-                <DockIcon icon={IconDeviceFloppy} onClick={handleSaveFile} />
+                <DockIcon
+                  icon={IconUpload}
+                  onMouseDown={handlePreserveSelectionMouseDown}
+                  onClick={handleOpenFile}
+                />
+                <DockIcon
+                  icon={IconDeviceFloppy}
+                  onMouseDown={handlePreserveSelectionMouseDown}
+                  onClick={handleSaveFile}
+                />
 
                 <div className="mx-2 mb-4 h-5 w-[1px] bg-gradient-to-b from-transparent via-neutral-600/50 to-transparent" />
 
                 {/* Group 4: Formatting */}
-                <DockIcon icon={IconArrowBackUp} onClick={handleUndo} />
-                <DockIcon icon={IconArrowForwardUp} onClick={handleRedo} />
-                <DockIcon icon={IconBold} onClick={handleBold} />
-                <DockIcon icon={IconItalic} onClick={handleItalic} />
-                <DockIcon icon={IconAlignRight} onClick={handleAlignRight} />
-                <DockIcon icon={IconAlignCenter} onClick={handleAlignCenter} />
+                <DockIcon
+                  icon={IconArrowBackUp}
+                  onMouseDown={handlePreserveSelectionMouseDown}
+                  onClick={handleUndo}
+                />
+                <DockIcon
+                  icon={IconArrowForwardUp}
+                  onMouseDown={handlePreserveSelectionMouseDown}
+                  onClick={handleRedo}
+                />
+                <DockIcon
+                  icon={IconBold}
+                  onMouseDown={handlePreserveSelectionMouseDown}
+                  onClick={handleBold}
+                />
+                <DockIcon
+                  icon={IconItalic}
+                  onMouseDown={handlePreserveSelectionMouseDown}
+                  onClick={handleItalic}
+                />
+                <DockIcon
+                  icon={IconAlignRight}
+                  onMouseDown={handlePreserveSelectionMouseDown}
+                  onClick={handleAlignRight}
+                />
+                <DockIcon
+                  icon={IconAlignCenter}
+                  onMouseDown={handlePreserveSelectionMouseDown}
+                  onClick={handleAlignCenter}
+                />
 
                 <div className="mx-2 mb-4 h-5 w-[1px] bg-gradient-to-b from-transparent via-neutral-600/50 to-transparent" />
 
                 {/* Group 5: Info */}
-                <DockIcon icon={IconInfoCircle} onClick={handleShowHelp} />
+                <DockIcon
+                  icon={IconInfoCircle}
+                  onMouseDown={handlePreserveSelectionMouseDown}
+                  onClick={handleShowHelp}
+                />
               </HoverBorderGradient>
             </motion.div>
           </div>

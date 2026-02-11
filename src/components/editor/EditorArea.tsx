@@ -31,6 +31,9 @@ export interface EditorHandle {
   insertContent: (content: string, mode?: "insert" | "replace") => void;
   getElement: () => HTMLDivElement | null;
   getAllText: () => string;
+  getAllHtml: () => string;
+  selectAllContent: () => void;
+  focusEditor: () => void;
 }
 
 interface EditorAreaProps {
@@ -69,6 +72,15 @@ export const EditorArea = forwardRef<EditorHandle, EditorAreaProps>(
         Array.from(body.children).forEach((child) => nodes.push(child));
       });
       return nodes;
+    };
+
+    const getAllBodies = () => {
+      if (!containerRef.current) return [];
+      return Array.from(
+        containerRef.current.querySelectorAll<HTMLDivElement>(
+          ".screenplay-sheet__body"
+        )
+      );
     };
 
     const isCurrentElementEmpty = () => {
@@ -540,6 +552,34 @@ export const EditorArea = forwardRef<EditorHandle, EditorAreaProps>(
       getAllText: () => {
         const nodes = getAllContentNodes();
         return nodes.map((n) => (n as HTMLElement).innerText).join("\n");
+      },
+      getAllHtml: () => {
+        const bodies = getAllBodies();
+        return bodies
+          .map((body) => body.innerHTML.trim())
+          .filter((content) => content.length > 0 && content !== "<br>")
+          .join("");
+      },
+      selectAllContent: () => {
+        const bodies = getAllBodies();
+        if (bodies.length === 0) return;
+
+        const firstBody = bodies[0];
+        const lastBody = bodies[bodies.length - 1];
+        const selection = window.getSelection();
+        if (!selection) return;
+
+        const range = document.createRange();
+        range.setStart(firstBody, 0);
+        range.setEnd(lastBody, lastBody.childNodes.length);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      },
+      focusEditor: () => {
+        const bodies = getAllBodies();
+        if (bodies.length === 0) return;
+        const target = bodies[bodies.length - 1];
+        target.focus();
       },
     }));
 
