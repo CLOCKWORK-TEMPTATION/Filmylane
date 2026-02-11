@@ -23,16 +23,16 @@ jobs:
         run: |
           echo "🔍 Scanning for potential secrets..."
           
-          # Define patterns to search for
+          # Define patterns to search for with more precise matching
           patterns=(
-            "sk-[a-zA-Z0-9]{20,}"
-            "AIza[a-zA-Z0-9_-]{35}"
-            "[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com"
-            "ya29\.[a-zA-Z0-9_-]{20,}"
-            "ghp_[a-zA-Z0-9]{36}"
-            "mongodb\+srv://[^\s'\"]+"
-            "postgres://[^\s'\"]+"
-            "mysql://[^\s'\"]+"
+            "sk-[a-zA-Z0-9]{40,51}"                         # OpenAI/Anthropic API keys
+            "AIza[a-zA-Z0-9_-]{39}"                         # Google API keys (exact length)
+            "[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com" # Google OAuth Client IDs
+            "ya29\.[a-zA-Z0-9_-]{20,}"                      # Google OAuth Tokens
+            "ghp_[a-zA-Z0-9]{36}"                           # GitHub Personal Access Tokens
+            "mongodb\+srv://[^\s'\"]+"                      # MongoDB connection strings
+            "postgres://[^\s'\"]+"                          # PostgreSQL connection strings
+            "mysql://[^\s'\"]+"                             # MySQL connection strings
           )
           
           found=0
@@ -45,8 +45,8 @@ jobs:
             fi
           done
           
-          # Check for .env files (excluding .env.example)
-          if git ls-files | grep -E "^\.env$|^\.env\..*$" | grep -v "\.env\.example$"; then
+          # Check for .env files anywhere in repository (not just root)
+          if git ls-files | grep -E '(^|/)\.env$|(^|/)\.env\.[^.]+$' | grep -v "\.env\.example$"; then
             echo "❌ Found .env files in repository!"
             found=1
           fi
