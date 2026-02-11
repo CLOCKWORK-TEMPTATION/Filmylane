@@ -1,0 +1,951 @@
+"use client";
+
+import React, { useState, useRef, useCallback } from "react";
+import {
+  IconInfoCircle,
+  IconList,
+  IconAlignLeft,
+  IconAlignRight,
+  IconAlignCenter,
+  IconItalic,
+  IconBold,
+  IconArrowBackUp,
+  IconArrowForwardUp,
+  IconDeviceFloppy,
+  IconUpload,
+  IconHistory,
+  IconMessage,
+  IconBulb,
+  IconStethoscope,
+  IconDownload,
+  IconMovie,
+  IconChevronDown,
+  IconFileText,
+  IconSettings,
+  IconSearch,
+  IconUser,
+  IconSparkles,
+  IconFilePlus,
+  IconFolderOpen,
+  IconCopy,
+  IconClipboard,
+  IconScissors,
+  IconSelect,
+  IconTextCaption,
+  IconSeparator,
+  IconWand,
+  IconFileExport,
+  IconKeyboard,
+  IconHelp,
+} from "@tabler/icons-react";
+import { cn, exportToPDF, openTextFile, saveTextFile } from "@/utils";
+import { motion, AnimatePresence } from "motion/react";
+import { screenplayFormats } from "@/constants";
+import { EditorArea, EditorHandle } from "./EditorArea";
+import { EditorFooter } from "./EditorFooter";
+import { HoverBorderGradient } from "@/components/ui/hover-border-gradient";
+import { BackgroundRippleEffect } from "@/components/ui/background-ripple-effect";
+import { useToast } from "@/hooks/use-toast";
+import type { DocumentStats } from "@/types/screenplay";
+
+// --- Dock Icon Component ---
+function DockIcon({
+  icon: Icon,
+  onClick,
+  active = false,
+}: {
+  icon: React.ElementType;
+  onClick?: () => void;
+  active?: boolean;
+}) {
+  return (
+    <div className="relative z-10 flex h-10 w-10 items-center justify-center">
+      <HoverBorderGradient
+        as="button"
+        onClick={onClick}
+        containerClassName="h-full w-full rounded-full"
+        className={cn(
+          "flex h-full w-full items-center justify-center p-0 transition-all duration-200",
+          active
+            ? "bg-primary text-primary-foreground"
+            : "bg-neutral-900/90 text-neutral-400 hover:bg-neutral-800 hover:text-white"
+        )}
+      >
+        <Icon size={20} stroke={1.5} />
+      </HoverBorderGradient>
+      {active && (
+        <div className="absolute -bottom-2 h-1 w-1 rounded-full bg-primary blur-[1px]" />
+      )}
+    </div>
+  );
+}
+
+// --- Background Grid Component ---
+const BackgroundGrid = () => (
+  <div className="pointer-events-none fixed inset-0 z-0">
+    <div className="absolute inset-0 bg-neutral-950 bg-[linear-gradient(to_right,#80808012_1px,transparent_1px),linear-gradient(to_bottom,#80808012_1px,transparent_1px)] bg-[size:24px_24px]"></div>
+    <div className="absolute left-0 right-0 top-0 -z-10 m-auto h-[310px] w-[310px] rounded-full bg-primary opacity-20 blur-[100px]"></div>
+    <div className="absolute bottom-0 right-0 -z-10 m-auto h-[310px] w-[310px] rounded-full bg-accent opacity-20 blur-[100px]"></div>
+  </div>
+);
+
+// --- Sidebar Item Component ---
+const SidebarItem = ({
+  icon: Icon,
+  label,
+  active = false,
+  items = [],
+  isOpen = false,
+  onToggle,
+  onItemClick,
+}: {
+  icon: React.ElementType;
+  label: string;
+  active?: boolean;
+  items?: string[];
+  isOpen?: boolean;
+  onToggle?: () => void;
+  onItemClick?: (item: string) => void;
+}) => (
+  <div className="mb-2">
+    <HoverBorderGradient
+      as="button"
+      onClick={onToggle}
+      containerClassName="w-full rounded-xl"
+      className={cn(
+        "flex w-full items-center gap-3 bg-neutral-900/50 p-3 transition-all duration-200",
+        active ? "text-white" : "text-neutral-500 hover:text-neutral-200"
+      )}
+      duration={1}
+    >
+      <Icon size={20} stroke={1.5} />
+      <span className="flex-1 text-right text-sm font-medium">{label}</span>
+      {items.length > 0 && (
+        <IconChevronDown
+          size={14}
+          className={cn(
+            "text-neutral-600 transition-transform duration-300",
+            isOpen ? "rotate-0" : "rotate-90"
+          )}
+        />
+      )}
+    </HoverBorderGradient>
+
+    <AnimatePresence>
+      {isOpen && items.length > 0 && (
+        <motion.div
+          initial={{ opacity: 0, height: 0, marginTop: 0 }}
+          animate={{ opacity: 1, height: "auto", marginTop: 8 }}
+          exit={{ opacity: 0, height: 0, marginTop: 0 }}
+          className="overflow-hidden pr-4"
+        >
+          {items.map((subItem, idx) => (
+            <motion.div
+              key={idx}
+              initial={{ x: -10, opacity: 0 }}
+              animate={{ x: 0, opacity: 1 }}
+              transition={{ delay: idx * 0.05 }}
+              onClick={() => onItemClick?.(subItem)}
+              className="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-xs text-neutral-400 transition-colors hover:bg-white/5 hover:text-white"
+            >
+              <div className="h-1 w-1 rounded-full bg-neutral-600" />
+              {subItem}
+            </motion.div>
+          ))}
+        </motion.div>
+      )}
+    </AnimatePresence>
+  </div>
+);
+
+type MenuActionId =
+  | "new-file"
+  | "open-file"
+  | "save-file"
+  | "export-pdf"
+  | "undo"
+  | "redo"
+  | "cut"
+  | "copy"
+  | "paste"
+  | "select-all"
+  | "insert-scene-header"
+  | "insert-character"
+  | "insert-dialogue"
+  | "insert-action"
+  | "insert-transition"
+  | "bold"
+  | "italic"
+  | "align-right"
+  | "align-center"
+  | "align-left"
+  | "spell-check"
+  | "script-analysis"
+  | "ai-suggestions"
+  | "show-help"
+  | "about";
+
+export const ScreenplayEditor = () => {
+  const [activeMenu, setActiveMenu] = useState<string | null>(null);
+  const [openSidebarItem, setOpenSidebarItem] = useState<string | null>(null);
+  const [currentFormat, setCurrentFormat] = useState("action");
+  const [stats, setStats] = useState<DocumentStats>({
+    words: 0,
+    characters: 0,
+    pages: 1,
+    scenes: 0,
+  });
+
+  const editorRef = useRef<EditorHandle>(null);
+  const { toast } = useToast();
+
+  const toggleMenu = (id: string) => {
+    setActiveMenu(activeMenu === id ? null : id);
+  };
+
+  const handleContentChange = useCallback(() => {}, []);
+  const handleStatsChange = useCallback(
+    (newStats: DocumentStats) => setStats(newStats),
+    []
+  );
+  const handleFormatChange = useCallback(
+    (format: string) => setCurrentFormat(format),
+    []
+  );
+
+  // ============ FILE OPERATIONS ============
+  const handleNewFile = () => {
+    if (
+      confirm("هل تريد إنشاء مستند جديد؟ سيتم فقدان التغييرات غير المحفوظة.")
+    ) {
+      editorRef.current?.insertContent(
+        '<div class="format-action"><br></div>',
+        "replace"
+      );
+      toast({ title: "مستند جديد", description: "تم إنشاء مستند جديد بنجاح" });
+    }
+    setActiveMenu(null);
+  };
+
+  const handleOpenFile = async () => {
+    const text = await openTextFile(".txt,.fountain,.fdx");
+    if (text) {
+      const lines = text
+        .split("\n")
+        .map((line) => `<div class="format-action">${line || "<br>"}</div>`)
+        .join("");
+      editorRef.current?.insertContent(lines, "replace");
+      toast({ title: "تم الفتح", description: "تم فتح الملف بنجاح" });
+    }
+    setActiveMenu(null);
+  };
+
+  const handleSaveFile = () => {
+    const content = editorRef.current?.getAllText() || "";
+    saveTextFile(content, "screenplay.txt", "text/plain;charset=utf-8");
+    toast({ title: "تم الحفظ", description: "تم حفظ الملف بنجاح" });
+    setActiveMenu(null);
+  };
+
+  const handleExportPDF = async () => {
+    const editorElement = editorRef.current?.getElement();
+
+    if (!editorElement) {
+      toast({
+        title: "خطأ",
+        description: "لا يوجد محتوى للتصدير",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // Get all content from screenplay bodies
+    const bodies = editorElement.querySelectorAll(".screenplay-sheet__body");
+
+    let allContent = "";
+    bodies.forEach((body) => {
+      const content = body.innerHTML;
+      if (content && content.trim() && content !== "<br>") {
+        allContent += content;
+      }
+    });
+
+    if (!allContent.trim()) {
+      toast({
+        title: "خطأ",
+        description: "لا يوجد محتوى للتصدير. اكتب شيئاً في المحرر أولاً.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    toast({ title: "جاري التصدير", description: "جاري فتح نافذة الطباعة..." });
+
+    // Use the unified exportToPDF with Arabic RTL support
+    await exportToPDF(allContent, "سيناريو");
+
+    setActiveMenu(null);
+  };
+
+  // ============ EDIT OPERATIONS ============
+  const handleUndo = () => {
+    document.execCommand("undo");
+    editorRef.current?.getElement()?.focus();
+  };
+
+  const handleRedo = () => {
+    document.execCommand("redo");
+    editorRef.current?.getElement()?.focus();
+  };
+
+  const handleCopy = () => {
+    document.execCommand("copy");
+    toast({ title: "تم النسخ", description: "تم نسخ النص المحدد" });
+    setActiveMenu(null);
+  };
+
+  const handleCut = () => {
+    document.execCommand("cut");
+    toast({ title: "تم القص", description: "تم قص النص المحدد" });
+    setActiveMenu(null);
+  };
+
+  const handlePaste = async () => {
+    const text = await navigator.clipboard.readText();
+    document.execCommand("insertText", false, text);
+    setActiveMenu(null);
+  };
+
+  const handleSelectAll = () => {
+    document.execCommand("selectAll");
+    setActiveMenu(null);
+  };
+
+  // ============ FORMAT OPERATIONS ============
+  const handleBold = () => {
+    document.execCommand("bold");
+    editorRef.current?.getElement()?.focus();
+  };
+
+  const handleItalic = () => {
+    document.execCommand("italic");
+    editorRef.current?.getElement()?.focus();
+  };
+
+  const handleAlignRight = () => {
+    document.execCommand("justifyRight");
+    editorRef.current?.getElement()?.focus();
+  };
+
+  const handleAlignCenter = () => {
+    document.execCommand("justifyCenter");
+    editorRef.current?.getElement()?.focus();
+  };
+
+  const handleAlignLeft = () => {
+    document.execCommand("justifyLeft");
+    editorRef.current?.getElement()?.focus();
+  };
+
+  // ============ INSERT OPERATIONS ============
+  const handleInsertSceneHeader = () => {
+    editorRef.current?.insertContent(
+      '<div class="format-scene-header-1">INT. المكان - الوقت</div>',
+      "insert"
+    );
+    setActiveMenu(null);
+  };
+
+  const handleInsertCharacter = () => {
+    editorRef.current?.insertContent(
+      '<div class="format-character">اسم الشخصية</div>',
+      "insert"
+    );
+    setActiveMenu(null);
+  };
+
+  const handleInsertDialogue = () => {
+    editorRef.current?.insertContent(
+      '<div class="format-dialogue">الحوار هنا...</div>',
+      "insert"
+    );
+    setActiveMenu(null);
+  };
+
+  const handleInsertAction = () => {
+    editorRef.current?.insertContent(
+      '<div class="format-action">وصف الحدث...</div>',
+      "insert"
+    );
+    setActiveMenu(null);
+  };
+
+  const handleInsertTransition = () => {
+    editorRef.current?.insertContent(
+      '<div class="format-transition">قطع إلى:</div>',
+      "insert"
+    );
+    setActiveMenu(null);
+  };
+
+  // ============ TOOLS ============
+  const handleSpellCheck = () => {
+    toast({
+      title: "فحص الإملاء",
+      description: "جاري فحص الأخطاء الإملائية...",
+    });
+    setActiveMenu(null);
+  };
+
+  const handleScriptAnalysis = () => {
+    toast({ title: "تحليل السيناريو", description: "جاري تحليل السيناريو..." });
+    setActiveMenu(null);
+  };
+
+  const handleAISuggestions = () => {
+    toast({
+      title: "اقتراحات الذكاء الاصطناعي",
+      description: "جاري توليد الاقتراحات...",
+    });
+    setActiveMenu(null);
+  };
+
+  // ============ HELP ============
+  const handleShowHelp = () => {
+    toast({
+      title: "اختصارات لوحة المفاتيح",
+      description:
+        "Ctrl+1: عنوان مشهد | Ctrl+2: شخصية | Ctrl+3: حوار | Ctrl+4: حدث | Tab: تغيير التنسيق",
+    });
+    setActiveMenu(null);
+  };
+
+  const handleAbout = () => {
+    toast({
+      title: "أفان تيتر",
+      description: "محرر سيناريوهات احترافي - النسخة 1.0",
+    });
+    setActiveMenu(null);
+  };
+
+  // ============ SIDEBAR HANDLERS ============
+  const handleRecentDocClick = (item: string) => {
+    toast({ title: "فتح مستند", description: `جاري فتح: ${item}` });
+  };
+
+  const handleProjectClick = (item: string) => {
+    toast({ title: "فتح مشروع", description: `جاري فتح مشروع: ${item}` });
+  };
+
+  const handleLibraryClick = (item: string) => {
+    toast({ title: "المكتبة", description: `جاري فتح قسم: ${item}` });
+  };
+
+  const handleSettingsClick = (item: string) => {
+    const settingsMap: Record<string, string> = {
+      عام: "الإعدادات العامة للتطبيق",
+      المظهر: "تخصيص الألوان والخطوط",
+      الحساب: "إعدادات الحساب والمزامنة",
+      "النسخ الاحتياطي": "إدارة النسخ الاحتياطية",
+    };
+    toast({
+      title: item,
+      description: settingsMap[item] || "جاري فتح الإعدادات...",
+    });
+  };
+
+  const handleMenuAction = (actionId: MenuActionId) => {
+    switch (actionId) {
+      case "new-file":
+        handleNewFile();
+        break;
+      case "open-file":
+        void handleOpenFile();
+        break;
+      case "save-file":
+        handleSaveFile();
+        break;
+      case "export-pdf":
+        void handleExportPDF();
+        break;
+      case "undo":
+        handleUndo();
+        break;
+      case "redo":
+        handleRedo();
+        break;
+      case "cut":
+        handleCut();
+        break;
+      case "copy":
+        handleCopy();
+        break;
+      case "paste":
+        void handlePaste();
+        break;
+      case "select-all":
+        handleSelectAll();
+        break;
+      case "insert-scene-header":
+        handleInsertSceneHeader();
+        break;
+      case "insert-character":
+        handleInsertCharacter();
+        break;
+      case "insert-dialogue":
+        handleInsertDialogue();
+        break;
+      case "insert-action":
+        handleInsertAction();
+        break;
+      case "insert-transition":
+        handleInsertTransition();
+        break;
+      case "bold":
+        handleBold();
+        break;
+      case "italic":
+        handleItalic();
+        break;
+      case "align-right":
+        handleAlignRight();
+        break;
+      case "align-center":
+        handleAlignCenter();
+        break;
+      case "align-left":
+        handleAlignLeft();
+        break;
+      case "spell-check":
+        handleSpellCheck();
+        break;
+      case "script-analysis":
+        handleScriptAnalysis();
+        break;
+      case "ai-suggestions":
+        handleAISuggestions();
+        break;
+      case "show-help":
+        handleShowHelp();
+        break;
+      case "about":
+        handleAbout();
+        break;
+    }
+  };
+
+  // ============ MENU DEFINITIONS ============
+  const menuItems: Record<
+    string,
+    Array<{ label: string; icon: React.ElementType; actionId: MenuActionId }>
+  > = {
+    ملف: [
+      { label: "مستند جديد", icon: IconFilePlus, actionId: "new-file" },
+      { label: "فتح...", icon: IconFolderOpen, actionId: "open-file" },
+      { label: "حفظ", icon: IconDeviceFloppy, actionId: "save-file" },
+      { label: "تصدير كـ PDF", icon: IconFileExport, actionId: "export-pdf" },
+    ],
+    تعديل: [
+      { label: "تراجع", icon: IconArrowBackUp, actionId: "undo" },
+      { label: "إعادة", icon: IconArrowForwardUp, actionId: "redo" },
+      { label: "قص", icon: IconScissors, actionId: "cut" },
+      { label: "نسخ", icon: IconCopy, actionId: "copy" },
+      { label: "لصق", icon: IconClipboard, actionId: "paste" },
+      { label: "تحديد الكل", icon: IconSelect, actionId: "select-all" },
+    ],
+    إدراج: [
+      {
+        label: "عنوان مشهد",
+        icon: IconTextCaption,
+        actionId: "insert-scene-header",
+      },
+      { label: "شخصية", icon: IconUser, actionId: "insert-character" },
+      { label: "حوار", icon: IconMessage, actionId: "insert-dialogue" },
+      { label: "حدث", icon: IconTextCaption, actionId: "insert-action" },
+      { label: "انتقال", icon: IconSeparator, actionId: "insert-transition" },
+    ],
+    تنسيق: [
+      { label: "غامق", icon: IconBold, actionId: "bold" },
+      { label: "مائل", icon: IconItalic, actionId: "italic" },
+      {
+        label: "محاذاة لليمين",
+        icon: IconAlignRight,
+        actionId: "align-right",
+      },
+      { label: "توسيط", icon: IconAlignCenter, actionId: "align-center" },
+      { label: "محاذاة لليسار", icon: IconAlignLeft, actionId: "align-left" },
+    ],
+    أدوات: [
+      { label: "فحص الإملاء", icon: IconWand, actionId: "spell-check" },
+      {
+        label: "تحليل السيناريو",
+        icon: IconStethoscope,
+        actionId: "script-analysis",
+      },
+      { label: "اقتراحات ذكية", icon: IconBulb, actionId: "ai-suggestions" },
+    ],
+    مساعدة: [
+      {
+        label: "اختصارات لوحة المفاتيح",
+        icon: IconKeyboard,
+        actionId: "show-help",
+      },
+      { label: "حول أفان تيتر", icon: IconHelp, actionId: "about" },
+    ],
+  };
+
+  return (
+    <div
+      className="selection:bg-primary/30 flex h-screen flex-col overflow-hidden bg-neutral-950 font-['Cairo'] text-neutral-200 selection:text-primary-foreground"
+      dir="rtl"
+    >
+      <BackgroundGrid />
+
+      {/* Header - Transparent Glass */}
+      <header className="relative z-50 flex h-20 flex-shrink-0 items-center justify-between bg-neutral-950/80 px-8 backdrop-blur-md">
+        <div className="flex items-center gap-6">
+          {/* Logo Brand - أفان تيتر */}
+          <HoverBorderGradient
+            containerClassName="rounded-lg cursor-pointer group"
+            as="div"
+            className="flex items-center gap-3 bg-neutral-900/80 px-4 py-2 leading-none"
+          >
+            <span className="flex h-2 w-2">
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-[#0F4C8A]"></span>
+            </span>
+            <span className="bg-gradient-to-r from-[#0F4C8A]/60 to-[#0F4C8A] bg-clip-text text-2xl font-bold text-transparent transition-all duration-300 group-hover:to-accent">
+              أفان تيتر
+            </span>
+          </HoverBorderGradient>
+
+          {/* Menus */}
+          <nav className="relative z-50 flex items-center gap-2 rounded-full border border-white/5 bg-neutral-900/50 p-1.5 backdrop-blur-md">
+            {["ملف", "تعديل", "إدراج", "تنسيق", "أدوات", "مساعدة"].map(
+              (menu) => (
+                <div key={menu} className="group relative">
+                  <HoverBorderGradient
+                    as="button"
+                    onClick={() => toggleMenu(menu)}
+                    containerClassName="rounded-full"
+                    className={cn(
+                      "bg-neutral-900/80 px-4 py-1.5 text-sm font-medium transition-all hover:bg-neutral-800",
+                      activeMenu === menu
+                        ? "text-white"
+                        : "text-neutral-400 group-hover:text-white"
+                    )}
+                  >
+                    {menu}
+                  </HoverBorderGradient>
+
+                  <AnimatePresence>
+                    {activeMenu === menu && (
+                      <motion.div
+                        initial={{
+                          opacity: 0,
+                          y: 10,
+                          scale: 0.95,
+                          filter: "blur(4px)",
+                        }}
+                        animate={{
+                          opacity: 1,
+                          y: 0,
+                          scale: 1,
+                          filter: "blur(0px)",
+                        }}
+                        exit={{
+                          opacity: 0,
+                          y: 10,
+                          scale: 0.95,
+                          filter: "blur(4px)",
+                        }}
+                        transition={{
+                          type: "spring",
+                          stiffness: 400,
+                          damping: 30,
+                        }}
+                        className="absolute right-0 top-full z-50 mt-2 w-52 overflow-hidden rounded-xl border border-white/10 bg-[#111] p-1.5 shadow-[0_20px_50px_-10px_rgba(0,0,0,0.8)] backdrop-blur-2xl"
+                      >
+                        {menuItems[menu]?.map((item, idx) => (
+                          <motion.button
+                            key={idx}
+                            onClick={() => handleMenuAction(item.actionId)}
+                            initial={{ x: -10, opacity: 0 }}
+                            animate={{ x: 0, opacity: 1 }}
+                            transition={{ delay: idx * 0.05 }}
+                            className="group flex w-full items-center gap-3 rounded-lg px-3 py-2 text-right text-sm text-neutral-400 transition-all hover:bg-white/10 hover:text-white"
+                          >
+                            <item.icon
+                              size={16}
+                              className="text-neutral-500 group-hover:text-white"
+                            />
+                            <span className="flex-1">{item.label}</span>
+                          </motion.button>
+                        ))}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+              )
+            )}
+          </nav>
+        </div>
+
+        {/* User Actions & Stats */}
+        <div className="flex items-center gap-4">
+          <HoverBorderGradient
+            as="button"
+            containerClassName="rounded-full"
+            className="bg-ring/10 flex items-center gap-2 px-3 py-1.5 text-xs font-bold uppercase tracking-wider text-ring"
+            duration={1}
+          >
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-ring" />
+            Online
+          </HoverBorderGradient>
+
+          <HoverBorderGradient
+            as="div"
+            containerClassName="rounded-full cursor-pointer"
+            className="flex h-10 w-10 items-center justify-center bg-gradient-to-tr from-neutral-800 to-neutral-700 p-0"
+            duration={1}
+          >
+            <IconUser className="text-neutral-300" size={18} />
+          </HoverBorderGradient>
+
+          {/* Platform Badge - النسخة */}
+          <HoverBorderGradient
+            containerClassName="rounded-lg cursor-pointer group"
+            as="div"
+            className="flex items-center gap-3 bg-neutral-900/80 px-4 py-2 leading-none"
+          >
+            <span className="bg-gradient-to-r from-[#029784]/60 to-[#029784] bg-clip-text text-2xl font-bold text-transparent transition-all duration-300 group-hover:to-[#40A5B3]">
+              النسخة
+            </span>
+            <span className="flex h-2 w-2">
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-[#029784]"></span>
+            </span>
+          </HoverBorderGradient>
+        </div>
+      </header>
+
+      {/* Main Layout */}
+      <div className="relative z-10 flex flex-1 overflow-hidden">
+        {/* Sidebar - Floating Glass Panel */}
+        <aside className="flex w-72 flex-col p-6">
+          <HoverBorderGradient
+            containerClassName="h-full w-full rounded-3xl"
+            className="flex h-full w-full flex-col items-stretch bg-neutral-900/30 p-4 backdrop-blur-xl"
+            as="div"
+            duration={1}
+          >
+            {/* Search Input */}
+            <div className="group relative mb-8">
+              <HoverBorderGradient
+                containerClassName="rounded-xl w-full group"
+                className="flex w-full items-center bg-neutral-950 px-3 py-3"
+                as="div"
+                duration={1}
+              >
+                <IconSearch
+                  size={18}
+                  className="text-neutral-500 transition-colors group-focus-within:text-primary"
+                />
+                <input
+                  type="text"
+                  placeholder="بحث..."
+                  className="w-full border-none bg-transparent px-3 text-sm text-white placeholder:text-neutral-600 focus:outline-none"
+                />
+                <kbd className="hidden rounded bg-neutral-800 px-1.5 font-sans text-[10px] text-neutral-400 group-hover:block">
+                  ⌘K
+                </kbd>
+              </HoverBorderGradient>
+            </div>
+
+            <div className="space-y-2">
+              <SidebarItem
+                icon={IconFileText}
+                label="المستندات الأخيرة"
+                items={[
+                  "سيناريو فيلم.txt",
+                  "مسودة الحلقة 1.txt",
+                  "ملاحظات المخرج.txt",
+                ]}
+                isOpen={openSidebarItem === "docs"}
+                onToggle={() =>
+                  setOpenSidebarItem(openSidebarItem === "docs" ? null : "docs")
+                }
+                onItemClick={handleRecentDocClick}
+              />
+              <SidebarItem
+                icon={IconList}
+                label="المشاريع"
+                items={["مسلسل الأخوة", "فيلم الرحلة", "مسلسل الحارة"]}
+                isOpen={openSidebarItem === "projects"}
+                onToggle={() =>
+                  setOpenSidebarItem(
+                    openSidebarItem === "projects" ? null : "projects"
+                  )
+                }
+                onItemClick={handleProjectClick}
+              />
+              <SidebarItem
+                icon={IconUpload}
+                label="المكتبة"
+                items={["القوالب", "الشخصيات", "المشاهد المحفوظة", "المفضلة"]}
+                isOpen={openSidebarItem === "library"}
+                onToggle={() =>
+                  setOpenSidebarItem(
+                    openSidebarItem === "library" ? null : "library"
+                  )
+                }
+                onItemClick={handleLibraryClick}
+              />
+              <SidebarItem
+                icon={IconSettings}
+                label="الإعدادات"
+                items={["عام", "المظهر", "الحساب", "النسخ الاحتياطي"]}
+                isOpen={openSidebarItem === "settings"}
+                onToggle={() =>
+                  setOpenSidebarItem(
+                    openSidebarItem === "settings" ? null : "settings"
+                  )
+                }
+                onItemClick={handleSettingsClick}
+              />
+            </div>
+
+            <div className="mt-auto">
+              <HoverBorderGradient
+                containerClassName="rounded-2xl w-full"
+                className="from-primary/10 to-accent/10 flex w-full flex-col items-start bg-gradient-to-br p-4"
+                as="div"
+                duration={1}
+              >
+                <IconSparkles className="mb-2 text-primary" size={20} />
+                <p className="text-xs font-light leading-relaxed text-muted-foreground">
+                  تم تفعيل وضع التركيز الذكي. استمتع بتجربة كتابة خالية من
+                  المشتتات.
+                </p>
+              </HoverBorderGradient>
+            </div>
+          </HoverBorderGradient>
+        </aside>
+
+        {/* Editor Area */}
+        <main className="relative flex flex-1 flex-col overflow-hidden">
+          {/* Floating Dock Toolbar */}
+          <div className="pointer-events-none absolute left-0 right-0 top-0 z-50 flex justify-center pt-2">
+            <motion.div
+              className="pointer-events-auto"
+              initial={{ y: -50, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              transition={{ type: "spring", stiffness: 300, damping: 20 }}
+            >
+              <HoverBorderGradient
+                as="div"
+                containerClassName="rounded-2xl mx-auto"
+                className="flex h-16 items-end gap-2 bg-neutral-900/80 px-4 pb-3"
+              >
+                {/* Group 1: Media/Export */}
+                <DockIcon
+                  icon={IconMovie}
+                  onClick={() =>
+                    toast({
+                      title: "معاينة",
+                      description: "جاري فتح معاينة الفيلم...",
+                    })
+                  }
+                />
+                <DockIcon icon={IconDownload} onClick={handleExportPDF} />
+
+                <div className="mx-2 mb-4 h-5 w-[1px] bg-gradient-to-b from-transparent via-neutral-600/50 to-transparent" />
+
+                {/* Group 2: Tools */}
+                <DockIcon
+                  icon={IconStethoscope}
+                  onClick={handleScriptAnalysis}
+                />
+                <DockIcon icon={IconBulb} onClick={handleAISuggestions} />
+
+                <div className="mx-2 mb-4 h-5 w-[1px] bg-gradient-to-b from-transparent via-neutral-600/50 to-transparent" />
+
+                {/* Group 3: Actions */}
+                <DockIcon
+                  icon={IconMessage}
+                  onClick={() =>
+                    toast({
+                      title: "الملاحظات",
+                      description: "جاري فتح لوحة الملاحظات...",
+                    })
+                  }
+                />
+                <DockIcon
+                  icon={IconHistory}
+                  onClick={() =>
+                    toast({
+                      title: "السجل",
+                      description: "جاري عرض سجل التغييرات...",
+                    })
+                  }
+                />
+                <DockIcon icon={IconUpload} onClick={handleOpenFile} />
+                <DockIcon icon={IconDeviceFloppy} onClick={handleSaveFile} />
+
+                <div className="mx-2 mb-4 h-5 w-[1px] bg-gradient-to-b from-transparent via-neutral-600/50 to-transparent" />
+
+                {/* Group 4: Formatting */}
+                <DockIcon icon={IconArrowBackUp} onClick={handleUndo} />
+                <DockIcon icon={IconArrowForwardUp} onClick={handleRedo} />
+                <DockIcon icon={IconBold} onClick={handleBold} />
+                <DockIcon icon={IconItalic} onClick={handleItalic} />
+                <DockIcon icon={IconAlignRight} onClick={handleAlignRight} />
+                <DockIcon icon={IconAlignCenter} onClick={handleAlignCenter} />
+
+                <div className="mx-2 mb-4 h-5 w-[1px] bg-gradient-to-b from-transparent via-neutral-600/50 to-transparent" />
+
+                {/* Group 5: Info */}
+                <DockIcon icon={IconInfoCircle} onClick={handleShowHelp} />
+              </HoverBorderGradient>
+            </motion.div>
+          </div>
+
+          {/* Editor Canvas */}
+          <div className="scrollbar-hide flex flex-1 justify-center overflow-y-auto p-8 pt-24">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: 0.5 }}
+              className="relative -mt-8 w-full max-w-[850px] pb-20"
+            >
+              {/* Background Ripple Effect */}
+              <BackgroundRippleEffect
+                rows={15}
+                cols={20}
+                cellSize={50}
+                className="opacity-50"
+              />
+
+              <EditorArea
+                ref={editorRef}
+                onContentChange={handleContentChange}
+                onStatsChange={handleStatsChange}
+                onFormatChange={handleFormatChange}
+                font="AzarMehrMonospaced-San"
+                size="12pt"
+                pageCount={stats.pages}
+              />
+            </motion.div>
+          </div>
+        </main>
+      </div>
+
+      <div className="relative z-50 flex-shrink-0 bg-neutral-950/80 backdrop-blur-md">
+        <EditorFooter
+          stats={stats}
+          currentFormatLabel={
+            screenplayFormats.find((f) => f.id === currentFormat)?.label || ""
+          }
+        />
+      </div>
+    </div>
+  );
+};
