@@ -79,17 +79,17 @@ describe("extractFileText", () => {
   });
 
   describe("docx extraction", () => {
-    it("should extract text via mammoth", async () => {
+    it("should extract text via mammoth and normalize newlines", async () => {
       const mammoth = await import("mammoth");
       const extractFn = mammoth.extractRawText ?? (mammoth as any).default?.extractRawText;
       (extractFn as any).mockResolvedValueOnce({
-        value: "نص مستخرج من docx",
+        value: "نص مستخرج\rمن docx",
       });
 
       const buffer = Buffer.from("fake-docx-content");
       const result = await extractFileText(buffer, "test.docx", "docx");
 
-      expect(result.text).toBe("نص مستخرج من docx");
+      expect(result.text).toBe("نص مستخرج\nمن docx");
       expect(result.fileType).toBe("docx");
       expect(result.method).toBe("mammoth");
       expect(result.usedOcr).toBe(false);
@@ -100,7 +100,7 @@ describe("extractFileText", () => {
     it("should use local parser when text is sufficient", async () => {
       const pdfParse = (await import("pdf-parse")).default as any;
       pdfParse.mockResolvedValueOnce({
-        text: "هذا نص PDF طويل بما يكفي ليعتبر نصاً قوياً للاستخراج المحلي",
+        text: "هذا نص PDF طويل بما يكفي\rليعتبر نصاً قوياً للاستخراج المحلي",
       });
 
       const buffer = Buffer.from("fake-pdf");
@@ -108,6 +108,7 @@ describe("extractFileText", () => {
 
       expect(result.method).toBe("native-text");
       expect(result.usedOcr).toBe(false);
+      expect(result.text).toContain("\n");
     });
 
     it("should fallback to OCR when text is weak and Mistral configured", async () => {
@@ -162,7 +163,7 @@ describe("extractFileText", () => {
         }
 
         if (cmd.includes("extract_doc.py")) {
-          return "Text from Word COM";
+          return "Text from Word COM\rSecond paragraph";
         }
 
         throw new Error(`Unexpected command: ${cmd}`);
@@ -171,7 +172,7 @@ describe("extractFileText", () => {
       const buffer = Buffer.from("fake-doc");
       const result = await extractFileText(buffer, "test.doc", "doc");
 
-      expect(result.text).toBe("Text from Word COM");
+      expect(result.text).toBe("Text from Word COM\nSecond paragraph");
       expect(result.method).toBe("word-com");
       expect(result.usedOcr).toBe(false);
       expect(result.attempts).toEqual([

@@ -51,6 +51,22 @@ function normalizeNewlines(text: string): string {
   return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
+/**
+ * توحيد النص المستخرج قبل تمريره إلى مسار التصنيف/اللصق:
+ * - تحويل كل أنواع فواصل الأسطر إلى \n
+ * - إزالة NUL/BOM والرموز غير المرئية التي تكسر التقسيم سطرًا بسطر
+ */
+function normalizeExtractedText(text: string): string {
+  return normalizeNewlines(text)
+    .split("\u0000")
+    .join("")
+    .split("\u000B")
+    .join("\n") // vertical tab
+    .replace(/\f/g, "\n")
+    .replace(/\u2028|\u2029/g, "\n")
+    .replace(/^\uFEFF/, "");
+}
+
 // ==================== DOCX ====================
 
 async function extractTextFromDocx(buffer: Buffer): Promise<string> {
@@ -316,7 +332,7 @@ export async function extractFileText(
     case "txt":
     case "fountain":
     case "fdx": {
-      const text = extractTextFromBuffer(buffer);
+      const text = normalizeExtractedText(extractTextFromBuffer(buffer));
       return {
         text,
         fileType,
@@ -328,7 +344,7 @@ export async function extractFileText(
     }
 
     case "docx": {
-      const text = await extractTextFromDocx(buffer);
+      const text = normalizeExtractedText(await extractTextFromDocx(buffer));
       return {
         text,
         fileType,
@@ -342,7 +358,7 @@ export async function extractFileText(
     case "pdf": {
       const pdfResult = await extractTextFromPdf(buffer, filename);
       return {
-        text: pdfResult.text,
+        text: normalizeExtractedText(pdfResult.text),
         fileType,
         method: pdfResult.method,
         usedOcr: pdfResult.usedOcr,
@@ -356,7 +372,7 @@ export async function extractFileText(
     case "doc": {
       const docResult = await extractTextFromDoc(buffer, filename);
       return {
-        text: docResult.text,
+        text: normalizeExtractedText(docResult.text),
         fileType,
         method: docResult.method,
         usedOcr: docResult.usedOcr,
