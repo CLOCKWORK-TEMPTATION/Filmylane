@@ -513,8 +513,19 @@ export const EditorArea = forwardRef<EditorHandle, EditorAreaProps>(
           if (containerRef.current) {
             const bodies = containerRef.current.querySelectorAll(".screenplay-sheet__body");
             bodies.forEach(b => b.innerHTML = "");
-            // Focus first body
-            (bodies[0] as HTMLElement)?.focus();
+            const firstBody = bodies[0] as HTMLElement | undefined;
+            // Focus first body and set caret directly at body root (no placeholder wrapper)
+            if (firstBody) {
+              firstBody.focus();
+              const selection = window.getSelection();
+              if (selection) {
+                const range = document.createRange();
+                range.selectNodeContents(firstBody);
+                range.collapse(true);
+                selection.removeAllRanges();
+                selection.addRange(range);
+              }
+            }
             repaginate();
           }
         } else {
@@ -695,14 +706,14 @@ export const EditorArea = forwardRef<EditorHandle, EditorAreaProps>(
               ".screenplay-sheet__body"
             );
             bodies.forEach((b) => (b.innerHTML = ""));
-            if (bodies[0]) {
-              (bodies[0] as HTMLElement).innerHTML =
-                '<div class="format-action"><br></div>';
-              // ضع المؤشر داخل العنصر الجديد
+            const firstBody = bodies[0] as HTMLElement | undefined;
+            if (firstBody) {
+              // ضع المؤشر مباشرة داخل جسم الصفحة (بدون عنصر وسيط يمنع التقسيم)
+              firstBody.focus();
               const sel = window.getSelection();
               if (sel) {
                 const range = document.createRange();
-                range.selectNodeContents(bodies[0].firstChild!);
+                range.selectNodeContents(firstBody);
                 range.collapse(true);
                 sel.removeAllRanges();
                 sel.addRange(range);

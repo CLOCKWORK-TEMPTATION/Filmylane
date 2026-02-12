@@ -88,6 +88,20 @@ describe("EditorArea file import integration", () => {
     body.innerHTML = '<div class="format-action">OLD CONTENT</div>';
     setCursorToEnd(body);
 
+    let selectionAncestorClassName = "";
+    handlePasteMock.mockImplementationOnce(async () => {
+      const selection = window.getSelection();
+      if (!selection || selection.rangeCount === 0) return;
+      const range = selection.getRangeAt(0);
+      let node: Node | null = range.commonAncestorContainer;
+      if (node.nodeType === Node.TEXT_NODE) {
+        node = node.parentNode;
+      }
+      if (node instanceof HTMLElement) {
+        selectionAncestorClassName = node.className;
+      }
+    });
+
     await act(async () => {
       await editorRef.current?.importClassifiedText("new imported text", "replace");
     });
@@ -98,6 +112,7 @@ describe("EditorArea file import integration", () => {
     };
     expect(eventArg.clipboardData.getData("text/plain")).toBe("new imported text");
     expect(body.innerHTML).not.toContain("OLD CONTENT");
+    expect(selectionAncestorClassName).toContain("screenplay-sheet__body");
   });
 
   it("insert mode preserves existing content and routes through handlePaste", async () => {
