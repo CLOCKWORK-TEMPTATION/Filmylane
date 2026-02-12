@@ -7,6 +7,10 @@ const { handlePasteMock } = vi.hoisted(() => ({
   handlePasteMock: vi.fn(async () => {}),
 }));
 
+const { runPendingPasteConfirmationsMock } = vi.hoisted(() => ({
+  runPendingPasteConfirmationsMock: vi.fn(async () => {}),
+}));
+
 vi.mock("@/utils", () => {
   class MockContextMemoryManager {}
   class MockHybridClassifier {
@@ -17,7 +21,7 @@ vi.mock("@/utils", () => {
 
   return {
     handlePaste: handlePasteMock,
-    runPendingPasteConfirmations: vi.fn(async () => {}),
+    runPendingPasteConfirmations: runPendingPasteConfirmationsMock,
     ContextMemoryManager: MockContextMemoryManager,
     getFormatStyles: vi.fn(() => ({})),
     getNextFormatOnTab: vi.fn(() => "action"),
@@ -49,6 +53,7 @@ describe("EditorArea file import integration", () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean })
       .IS_REACT_ACT_ENVIRONMENT = true;
     handlePasteMock.mockClear();
+    runPendingPasteConfirmationsMock.mockClear();
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -112,5 +117,39 @@ describe("EditorArea file import integration", () => {
     };
     expect(eventArg.clipboardData.getData("text/plain")).toBe("inserted text");
     expect(body.innerHTML).toContain("KEEP CONTENT");
+  });
+
+  it("shows pending confirmations after import and executes them", async () => {
+    const body = container.querySelector(".screenplay-sheet__body") as HTMLElement;
+    expect(body).toBeTruthy();
+
+    setCursorToEnd(body);
+
+    handlePasteMock.mockImplementationOnce(async (...args: unknown[]) => {
+      const onPendingConfirmations = args[9] as
+        | ((pasteBatchId: string, pendingCount: number) => void)
+        | undefined;
+      onPendingConfirmations?.("batch-low-confidence", 2);
+    });
+
+    await act(async () => {
+      await editorRef.current?.importClassifiedText("needs confirmation", "insert");
+    });
+
+    const pendingButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("تأكيد التصنيفات")
+    );
+
+    expect(pendingButton).toBeTruthy();
+    expect(pendingButton?.textContent).toContain("2");
+
+    await act(async () => {
+      pendingButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(runPendingPasteConfirmationsMock).toHaveBeenCalledTimes(1);
+    expect(runPendingPasteConfirmationsMock).toHaveBeenCalledWith(
+      "batch-low-confidence"
+    );
   });
 });
