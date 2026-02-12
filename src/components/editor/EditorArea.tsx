@@ -590,30 +590,12 @@ export const EditorArea = forwardRef<EditorHandle, EditorAreaProps>(
         text: string,
         mode: "replace" | "insert"
       ) => {
-        // إنشاء pseudo clipboard event لتمريرها عبر مسار paste 1:1
-        const dataTransfer = new DataTransfer();
-        dataTransfer.setData("text/plain", text);
-
+        // pseudo ClipboardEvent يكفي لاستخدام مسار handlePaste الحقيقي (getData + preventDefault)
         const pseudoEvent = {
           preventDefault: () => {},
-          clipboardData: dataTransfer,
-          // الحقول المطلوبة لـ React.ClipboardEvent
-          nativeEvent: new ClipboardEvent("paste", {
-            clipboardData: dataTransfer,
-          }),
-          currentTarget: containerRef.current,
-          target: containerRef.current,
-          bubbles: true,
-          cancelable: true,
-          defaultPrevented: false,
-          eventPhase: 0,
-          isTrusted: false,
-          timeStamp: Date.now(),
-          type: "paste",
-          stopPropagation: () => {},
-          isDefaultPrevented: () => false,
-          isPropagationStopped: () => false,
-          persist: () => {},
+          clipboardData: {
+            getData: (format: string) => (format === "text/plain" ? text : ""),
+          },
         } as unknown as React.ClipboardEvent<HTMLDivElement>;
 
         if (mode === "replace") {
@@ -638,11 +620,19 @@ export const EditorArea = forwardRef<EditorHandle, EditorAreaProps>(
             }
           }
         } else {
-          // وضع insert: تأكد من وجود مؤشر في المحرر
-          const bodies = getAllBodies();
-          if (bodies.length > 0) {
-            const lastBody = bodies[bodies.length - 1];
-            lastBody.focus();
+          // وضع insert: لا نكسر موضع المؤشر الحالي، فقط fallback للنهاية إذا لا يوجد selection صالح
+          const selection = window.getSelection();
+          if (!selection || selection.rangeCount === 0) {
+            const bodies = getAllBodies();
+            if (bodies.length > 0) {
+              const lastBody = bodies[bodies.length - 1];
+              lastBody.focus();
+              const range = document.createRange();
+              range.selectNodeContents(lastBody);
+              range.collapse(false);
+              selection?.removeAllRanges();
+              selection?.addRange(range);
+            }
           }
         }
 

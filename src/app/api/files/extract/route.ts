@@ -4,7 +4,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { extractFileText } from "@/lib/file-extraction";
+import { extractFileText } from "@/utils/file-extraction";
 import {
   getFileType,
   type FileExtractionResponse,
