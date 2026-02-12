@@ -35,6 +35,11 @@ export interface EditorHandle {
   getAllHtml: () => string;
   selectAllContent: () => void;
   focusEditor: () => void;
+  /** استيراد نص عبر مسار paste 1:1 (يمرر النص كأنه لصق) */
+  importClassifiedText: (
+    text: string,
+    mode: "replace" | "insert"
+  ) => Promise<void>;
 }
 
 interface EditorAreaProps {
@@ -670,6 +675,75 @@ export const EditorArea = forwardRef<EditorHandle, EditorAreaProps>(
         if (bodies.length === 0) return;
         const target = bodies[bodies.length - 1];
         target.focus();
+      },
+      importClassifiedText: async (
+        text: string,
+        mode: "replace" | "insert"
+      ) => {
+        // pseudo ClipboardEvent يكفي لاستخدام مسار handlePaste الحقيقي (getData + preventDefault)
+        const pseudoEvent = {
+          preventDefault: () => {},
+          clipboardData: {
+            getData: (format: string) => (format === "text/plain" ? text : ""),
+          },
+        } as unknown as React.ClipboardEvent<HTMLDivElement>;
+
+        if (mode === "replace") {
+          // مسح المحتوى أولاً قبل اللصق
+          if (containerRef.current) {
+            const bodies = containerRef.current.querySelectorAll(
+              ".screenplay-sheet__body"
+            );
+            bodies.forEach((b) => (b.innerHTML = ""));
+            if (bodies[0]) {
+              (bodies[0] as HTMLElement).innerHTML =
+                '<div class="format-action"><br></div>';
+              // ضع المؤشر داخل العنصر الجديد
+              const sel = window.getSelection();
+              if (sel) {
+                const range = document.createRange();
+                range.selectNodeContents(bodies[0].firstChild!);
+                range.collapse(true);
+                sel.removeAllRanges();
+                sel.addRange(range);
+              }
+            }
+          }
+        } else {
+          // وضع insert: لا نكسر موضع المؤشر الحالي، فقط fallback للنهاية إذا لا يوجد selection صالح
+          const selection = window.getSelection();
+          if (!selection || selection.rangeCount === 0) {
+            const bodies = getAllBodies();
+            if (bodies.length > 0) {
+              const lastBody = bodies[bodies.length - 1];
+              lastBody.focus();
+              const range = document.createRange();
+              range.selectNodeContents(lastBody);
+              range.collapse(false);
+              selection?.removeAllRanges();
+              selection?.addRange(range);
+            }
+          }
+        }
+
+        // استدعاء handlePaste الحقيقي (مسار 1:1)
+        await newHandlePaste(
+          pseudoEvent,
+          virtualEditorRef,
+          (formatType) => getFormatStyles(formatType, fixedSize, fixedFont),
+          handleInput,
+          memoryManager,
+          undefined,
+          hybridClassifier,
+          feedbackCollector,
+          requestConfirmation,
+          (pasteBatchId, pendingCount) => {
+            setPendingConfirmations((prev) => [
+              ...prev,
+              { pasteBatchId, count: pendingCount },
+            ]);
+          }
+        );
       },
     }));
 

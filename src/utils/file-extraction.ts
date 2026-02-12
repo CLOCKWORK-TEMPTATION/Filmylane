@@ -1,300 +1,371 @@
-import fs from 'fs/promises';
-import path from 'path';
-import { exec } from 'child_process';
-import util from 'util';
-import iconv from 'iconv-lite';
-import mammoth from 'mammoth';
-import { ImportedFileType, FileExtractionResult } from '@/types/file-import';
+/**
+ * file-extraction.ts - منطق استخراج النصوص من الملفات (Server-side)
+ * يدعم: txt, fountain, fdx, docx, pdf, doc مع سلسلة fallback متعددة
+ */
 
-const execAsync = util.promisify(exec);
+import type {
+  FileExtractionResult,
+  ImportedFileType,
+  ExtractionMethod,
+} from "@/types/file-import";
+import {
+  extractTextWithMistralOcr,
+  isMistralConfigured,
+} from "./mistral-ocr";
 
-// Environment variables
-const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY;
-const MISTRAL_OCR_MODEL = process.env.MISTRAL_OCR_MODEL || 'mistral-ocr-latest';
+// ==================== Text/Fountain/FDX ====================
 
-// Helper to determine file type from extension
-export function getFileTypeFromExtension(filename: string): ImportedFileType | null {
-    const ext = path.extname(filename).toLowerCase();
-    switch (ext) {
-        case '.doc': return 'doc';
-        case '.docx': return 'docx';
-        case '.txt': return 'txt';
-        case '.pdf': return 'pdf';
-        case '.fountain': return 'fountain';
-        case '.fdx': return 'fdx'; // Treat FDX similar to Fountain for raw text extraction initially? Usually XML.
-        default: return null;
+/**
+ * استخراج نص من ملفات نصية بسيطة مع fallback للترميز
+ */
+function extractTextFromBuffer(buffer: Buffer): string {
+  // محاولة UTF-8 أولاً
+  const utf8Text = buffer.toString("utf-8");
+
+  // فحص إذا كان الملف يحتوي على أحرف BOM أو أحرف replacement
+  const hasReplacementChars =
+    utf8Text.includes("\uFFFD") || utf8Text.includes("�");
+
+  if (!hasReplacementChars) {
+    return normalizeNewlines(utf8Text);
+  }
+
+  // محاولة windows-1256 (الأكثر شيوعاً للعربية)
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const iconv = require("iconv-lite");
+    const win1256Text = iconv.decode(buffer, "windows-1256") as string;
+    if (win1256Text && !win1256Text.includes("\uFFFD")) {
+      return normalizeNewlines(win1256Text);
     }
+  } catch {
+    // iconv-lite غير متاح، نتابع
+  }
+
+  // fallback إلى latin1
+  const latin1Text = buffer.toString("latin1");
+  return normalizeNewlines(latin1Text);
 }
 
-// Main extraction function
-export async function extractFileContent(filePath: string, originalFilename: string): Promise<FileExtractionResult> {
-    const fileType = getFileTypeFromExtension(originalFilename);
-    const result: FileExtractionResult = {
-        text: '',
-        fileType: fileType || 'txt', // Default fallback
-        method: 'unknown',
+function normalizeNewlines(text: string): string {
+  return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+// ==================== DOCX ====================
+
+async function extractTextFromDocx(buffer: Buffer): Promise<string> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const mammoth = (await import("mammoth")) as any;
+  const extractRawText =
+    mammoth.extractRawText || mammoth.default?.extractRawText;
+  const result = await extractRawText({ buffer });
+  return result.value as string;
+}
+
+// ==================== PDF (Hybrid OCR) ====================
+
+/**
+ * محاولة استخراج نص محلي من PDF أولاً
+ * إذا كان النص فارغاً/ضعيفاً → OCR عبر Mistral
+ */
+async function extractTextFromPdf(
+  buffer: Buffer,
+  filename: string
+): Promise<{ text: string; method: ExtractionMethod; usedOcr: boolean; warnings: string[] }> {
+  const warnings: string[] = [];
+  const MIN_TEXT_DENSITY = 20; // حد أدنى للأحرف لاعتبار النص "قوي"
+
+  // محاولة 1: استخراج نص محلي
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const pdfParseModule = await import("pdf-parse") as any;
+    const pdfParse = pdfParseModule.default ?? pdfParseModule;
+    const pdfData = await pdfParse(buffer);
+    const localText = (pdfData.text || "").trim();
+
+    if (localText.length >= MIN_TEXT_DENSITY) {
+      return {
+        text: localText,
+        method: "native-text",
+        usedOcr: false,
+        warnings,
+      };
+    }
+
+    warnings.push(
+      `النص المحلي ضعيف (${localText.length} حرف)، سيتم استخدام OCR`
+    );
+  } catch (localError) {
+    warnings.push(
+      `فشل parser المحلي: ${localError instanceof Error ? localError.message : "خطأ غير معروف"}`
+    );
+  }
+
+  // محاولة 2: OCR عبر Mistral
+  if (isMistralConfigured()) {
+    try {
+      const ocrText = await extractTextWithMistralOcr(buffer, filename);
+      return {
+        text: ocrText,
+        method: "ocr-mistral",
+        usedOcr: true,
+        warnings,
+      };
+    } catch (ocrError) {
+      warnings.push(
+        `فشل Mistral OCR: ${ocrError instanceof Error ? ocrError.message : "خطأ غير معروف"}`
+      );
+    }
+  } else {
+    warnings.push(
+      "MISTRAL_API_KEY غير معرّف. لم يتم تشغيل OCR. أضف المفتاح لاستخراج النص من ملفات PDF الممسوحة."
+    );
+  }
+
+  // فشل كل المسارات
+  throw new Error(
+    `فشل استخراج نص من PDF.\nالتحذيرات:\n${warnings.join("\n")}`
+  );
+}
+
+// ==================== DOC (Fallback Ladder) ====================
+
+/**
+ * استخراج نص من ملف .doc مع سلسلة fallback كاملة:
+ * 1. antiword عبر WSL (/usr/bin/antiword)
+ * 2. antiword من المسار المخصص
+ * 3. Word COM automation (نص مباشر)
+ * 4. Word COM → PDF → OCR
+ * 5. OCR مباشر
+ */
+async function extractTextFromDoc(
+  buffer: Buffer,
+  filename: string
+): Promise<{ text: string; method: ExtractionMethod; usedOcr: boolean; warnings: string[]; attempts: string[] }> {
+  const warnings: string[] = [];
+  const attempts: string[] = [];
+
+  // كتابة الملف مؤقتاً
+  const { writeFileSync, unlinkSync, existsSync, mkdtempSync, rmSync } = await import("fs");
+  const { join } = await import("path");
+  const { tmpdir } = await import("os");
+  const { execSync } = await import("child_process");
+
+  const tempDir = mkdtempSync(join(tmpdir(), "doc-extract-"));
+  const tempFilePath = join(tempDir, filename);
+  writeFileSync(tempFilePath, buffer);
+
+  const cleanup = () => {
+    try {
+      if (existsSync(tempFilePath)) unlinkSync(tempFilePath);
+      rmSync(tempDir, { recursive: true, force: true });
+    } catch {
+      // تنظيف ليس حرجاً
+    }
+  };
+
+  try {
+    // === محاولة 1: antiword عبر WSL (مسار النظام) ===
+    try {
+      attempts.push("antiword (WSL /usr/bin/antiword)");
+      const wslPath = tempFilePath.replace(/\\/g, "/").replace(/^([A-Za-z]):/, "/mnt/$1".toLowerCase());
+      const result = execSync(
+        `wsl /usr/bin/antiword "${wslPath}"`,
+        { encoding: "utf-8", timeout: 30_000 }
+      );
+      if (result.trim().length > 0) {
+        return { text: result, method: "antiword", usedOcr: false, warnings, attempts };
+      }
+      warnings.push("antiword (WSL) أعاد نصاً فارغاً");
+    } catch (e) {
+      warnings.push(
+        `antiword (WSL): ${e instanceof Error ? e.message : "فشل"}`
+      );
+    }
+
+    // === محاولة 2: antiword من المسار المخصص ===
+    try {
+      const customAntiword = "D:\\aanalyze script\\antiword-build\\antiword";
+      attempts.push(`antiword (مسار مخصص: ${customAntiword})`);
+      const wslPath = tempFilePath.replace(/\\/g, "/").replace(/^([A-Za-z]):/, "/mnt/$1".toLowerCase());
+      const customWslPath = customAntiword.replace(/\\/g, "/").replace(/^([A-Za-z]):/, "/mnt/$1".toLowerCase());
+      const result = execSync(
+        `wsl "${customWslPath}" "${wslPath}"`,
+        { encoding: "utf-8", timeout: 30_000 }
+      );
+      if (result.trim().length > 0) {
+        return { text: result, method: "antiword", usedOcr: false, warnings, attempts };
+      }
+      warnings.push("antiword (مسار مخصص) أعاد نصاً فارغاً");
+    } catch (e) {
+      warnings.push(
+        `antiword (مسار مخصص): ${e instanceof Error ? e.message : "فشل"}`
+      );
+    }
+
+    // === محاولة 3: Word COM automation (نص مباشر) ===
+    try {
+      attempts.push("Word COM automation (نص مباشر)");
+      const pyScript = `
+import sys, os
+try:
+    import win32com.client
+    word = win32com.client.Dispatch("Word.Application")
+    word.Visible = False
+    doc = word.Documents.Open(r"${tempFilePath.replace(/\\/g, "\\\\")}")
+    text = doc.Content.Text
+    doc.Close(False)
+    word.Quit()
+    print(text)
+except Exception as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+`;
+      const pyTempPath = join(tempDir, "extract_doc.py");
+      writeFileSync(pyTempPath, pyScript, "utf-8");
+      const result = execSync(`python "${pyTempPath}"`, {
+        encoding: "utf-8",
+        timeout: 60_000,
+      });
+      if (result.trim().length > 0) {
+        return { text: result, method: "word-com", usedOcr: false, warnings, attempts };
+      }
+      warnings.push("Word COM (نص) أعاد نصاً فارغاً");
+    } catch (e) {
+      warnings.push(
+        `Word COM (نص): ${e instanceof Error ? e.message : "فشل"}`
+      );
+    }
+
+    // === محاولة 4: Word COM → PDF → OCR ===
+    if (isMistralConfigured()) {
+      try {
+        attempts.push("Word COM → PDF → OCR");
+        const pdfTempPath = join(tempDir, "converted.pdf");
+        const pyScript = `
+import sys
+try:
+    import win32com.client
+    word = win32com.client.Dispatch("Word.Application")
+    word.Visible = False
+    doc = word.Documents.Open(r"${tempFilePath.replace(/\\/g, "\\\\")}")
+    doc.SaveAs2(r"${pdfTempPath.replace(/\\/g, "\\\\")}", FileFormat=17)
+    doc.Close(False)
+    word.Quit()
+    print("OK")
+except Exception as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+`;
+        const pyTempPath = join(tempDir, "convert_to_pdf.py");
+        writeFileSync(pyTempPath, pyScript, "utf-8");
+        execSync(`python "${pyTempPath}"`, { encoding: "utf-8", timeout: 60_000 });
+
+        if (existsSync(pdfTempPath)) {
+          const { readFileSync } = await import("fs");
+          const pdfBuffer = readFileSync(pdfTempPath);
+          const ocrText = await extractTextWithMistralOcr(pdfBuffer, "converted.pdf");
+          return { text: ocrText, method: "ocr-mistral", usedOcr: true, warnings, attempts };
+        }
+        warnings.push("Word COM → PDF: لم يتم إنشاء ملف PDF");
+      } catch (e) {
+        warnings.push(
+          `Word COM → PDF → OCR: ${e instanceof Error ? e.message : "فشل"}`
+        );
+      }
+    }
+
+    // === محاولة 5: OCR مباشر على الملف ===
+    if (isMistralConfigured()) {
+      try {
+        attempts.push("OCR مباشر (best-effort)");
+        const ocrText = await extractTextWithMistralOcr(buffer, filename);
+        if (ocrText.trim().length > 0) {
+          return { text: ocrText, method: "ocr-mistral", usedOcr: true, warnings, attempts };
+        }
+        warnings.push("OCR مباشر أعاد نصاً فارغاً");
+      } catch (e) {
+        warnings.push(
+          `OCR مباشر: ${e instanceof Error ? e.message : "فشل"}`
+        );
+      }
+    }
+
+    // فشل الكل
+    throw new Error(
+      `فشل استخراج نص من ملف .doc بعد ${attempts.length} محاولة.\n` +
+        `المحاولات:\n${attempts.map((a, i) => `  ${i + 1}. ${a}`).join("\n")}\n` +
+        `التحذيرات:\n${warnings.map((w) => `  - ${w}`).join("\n")}`
+    );
+  } finally {
+    cleanup();
+  }
+}
+
+// ==================== Main Extraction Function ====================
+
+/**
+ * الدالة الرئيسية لاستخراج النص من أي نوع ملف مدعوم
+ */
+export async function extractFileText(
+  buffer: Buffer,
+  filename: string,
+  fileType: ImportedFileType
+): Promise<FileExtractionResult> {
+  switch (fileType) {
+    case "txt":
+    case "fountain":
+    case "fdx": {
+      const text = extractTextFromBuffer(buffer);
+      return {
+        text,
+        fileType,
+        method: "native-text",
         usedOcr: false,
         warnings: [],
-        attempts: [],
-        success: false
-    };
-
-    if (!fileType) {
-        result.error = `Unsupported file extension: ${path.extname(originalFilename)}`;
-        return result;
+        attempts: ["native-text"],
+      };
     }
 
-    try {
-        switch (fileType) {
-            case 'txt':
-            case 'fountain':
-            case 'fdx': // Basic text extraction for now
-                await extractTextFile(filePath, result);
-                break;
-            case 'docx':
-                await extractDocx(filePath, result);
-                break;
-            case 'pdf':
-                await extractPdf(filePath, result);
-                break;
-            case 'doc':
-                await extractDoc(filePath, result);
-                break;
-            default:
-                result.error = `Starting extraction for ${fileType} failed: handler not implemented.`;
-        }
-    } catch (error: any) {
-        result.error = error.message || String(error);
-        result.success = false;
+    case "docx": {
+      const text = await extractTextFromDocx(buffer);
+      return {
+        text,
+        fileType,
+        method: "mammoth",
+        usedOcr: false,
+        warnings: [],
+        attempts: ["mammoth"],
+      };
     }
 
-    return result;
-}
-
-// --- Specific Extractors ---
-
-async function extractTextFile(filePath: string, result: FileExtractionResult) {
-    try {
-        const buffer = await fs.readFile(filePath);
-
-        // Attempt decoding strategy: UTF-8 -> Windows-1256 -> Latin1
-        let text = '';
-        // Check for UTF-8 BOM or try decoding
-        try {
-            text = iconv.decode(buffer, 'utf-8');
-            // Simple heuristic: if likely garbage (too many replacement chars), try next
-            if (text.includes('') && text.split('').length > text.length * 0.1) {
-                throw new Error('Likely not UTF-8');
-            }
-        } catch {
-            try {
-                text = iconv.decode(buffer, 'win1256');
-            } catch {
-                text = iconv.decode(buffer, 'latin1');
-            }
-        }
-
-        // Normalize newlines
-        result.text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-        result.method = 'native-text';
-        result.success = true;
-    } catch (e: any) {
-        result.attempts.push(`Text extraction failed: ${e.message}`);
-        throw e;
-    }
-}
-
-async function extractDocx(filePath: string, result: FileExtractionResult) {
-    try {
-        const buffer = await fs.readFile(filePath);
-        // @ts-ignore: type definition might be missing buffer overload
-        const { value, messages } = await mammoth.extractRawText({ buffer });
-
-        result.text = value;
-        if (messages && messages.length > 0) {
-            messages.forEach((m: any) => result.warnings.push(m.message));
-        }
-        result.method = 'mammoth';
-        result.success = true;
-    } catch (e: any) {
-        result.attempts.push(`Mammoth extraction failed: ${e.message}`);
-        throw e;
-    }
-}
-
-async function extractPdf(filePath: string, result: FileExtractionResult) {
-    // 1. Try local generic PDF extraction
-    try {
-        const buffer = await fs.readFile(filePath);
-        // Dynamic import to avoid crash if not installed
-        const pdfParse = (await import('pdf-parse')).default;
-        const data = await pdfParse(buffer);
-
-        const text = data.text;
-        const cleanText = text.trim();
-
-        // Density check: if text is very short relative to file size or pages, might be scanned
-        // For now, simple length check.
-        if (cleanText.length > 50) {
-            result.text = cleanText;
-            result.method = 'pdf-parse';
-            result.success = true;
-            return;
-        }
-        result.attempts.push('pdf-parse returned empty/low text, trying OCR');
-    } catch (e: any) {
-        result.attempts.push(`pdf-parse failed: ${e.message}, trying OCR`);
+    case "pdf": {
+      const pdfResult = await extractTextFromPdf(buffer, filename);
+      return {
+        text: pdfResult.text,
+        fileType,
+        method: pdfResult.method,
+        usedOcr: pdfResult.usedOcr,
+        warnings: pdfResult.warnings,
+        attempts: pdfResult.usedOcr
+          ? ["local-parser", "ocr-mistral"]
+          : ["local-parser"],
+      };
     }
 
-    // 2. Fallback to Mistral OCR
-    if (MISTRAL_API_KEY) {
-        await performMistralOcr(filePath, result);
-    } else {
-        result.warnings.push('OCR skipped: MISTRAL_API_KEY not found');
-    }
-}
-
-async function extractDoc(filePath: string, result: FileExtractionResult) {
-    // 1. Try antiword (via WSL or local path)
-    // Assumption: 'antiword' is in PATH or specific location
-    // The plan mentions: D:\aanalyze script\antiword-build\antiword or WSL /usr/bin/antiword
-
-    // Try WSL first if on Windows (implied by file paths in prompt)
-    // We'll try a few known commands
-
-    // Strategy 1: Antiword via WSL
-    try {
-        // Convert windows path to wsl path for the command
-        // Simple heuristic: E:\... -> /mnt/e/...
-        // But execution context might be tricky. Let's try simple 'antiword' first if it matches
-        // If not, we might need to skip to OCR/COM if we can't easily invoke WSL from here without setup.
-        // Let's assume the environment might have 'antiword' or we skip.
-
-        // Actually, let's try the COM automation first if on Windows, as it's more native? 
-        // Plan says: antiword priority.
-
-        // Let's try to detect if we can run antiword.
-        // For now, let's implement the fallback chain structure.
-
-        // Mock implementation of local antiword check:
-        // const { stdout } = await execAsync(`antiword -m UTF-8.txt "${filePath}"`);
-        // result.text = stdout;
-        // result.method = 'antiword';
-        // result.success = true;
-        // return;
-
-        throw new Error("Antiword auto-detection not fully implemented, skipping to COM/OCR");
-    } catch (e: any) {
-        result.attempts.push(`Antiword failed: ${e.message}`);
+    case "doc": {
+      const docResult = await extractTextFromDoc(buffer, filename);
+      return {
+        text: docResult.text,
+        fileType,
+        method: docResult.method,
+        usedOcr: docResult.usedOcr,
+        warnings: docResult.warnings,
+        attempts: docResult.attempts,
+      };
     }
 
-    // 2. Word COM Automation (Stub for detailed implementation)
-    // This would require a python script trigger.
-    // For this environment, let's try to proceed to OCR if configured, or just error out if no tools.
-
-    // 3. Fallback to Mistral OCR (Needs conversion to PDF or image first? Mistral supports some docs?)
-    // Mistral OCR usually takes images or PDFs. 
-    // If we can't convert .doc to .pdf easily, we might be stuck.
-    // Ideally we use a cloud convert or a local tool to convert .doc -> .pdf
-
-    // Attempt Mistral OCR directly? (Mistral might support .doc in future, but safely assumes PDF/Image)
-    // For now, if we can't read .doc locally, we report failure unless we have a converter.
-
-    result.error = "Could not extract text from .doc file (Antiword/Word COM not available).";
-}
-
-
-// --- OCR Helper ---
-async function performMistralOcr(filePath: string, result: FileExtractionResult) {
-    try {
-        const fileBuffer = await fs.readFile(filePath);
-        const blob = new Blob([fileBuffer]);
-        const formData = new FormData();
-        formData.append('file', blob, path.basename(filePath));
-        formData.append('purpose', 'ocr');
-
-        // 1. Upload File
-        const uploadRes = await fetch('https://api.mistral.ai/v1/files', {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${MISTRAL_API_KEY}`
-            },
-            body: formData
-        });
-
-        if (!uploadRes.ok) throw new Error(`Upload failed: ${uploadRes.statusText}`);
-        const uploadJson = await uploadRes.json();
-        const fileId = uploadJson.id;
-
-        // 2. Request OCR
-        const ocrRes = await fetch('https://api.mistral.ai/v1/ocr', {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${MISTRAL_API_KEY}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                model: MISTRAL_OCR_MODEL,
-                document: {
-                    type: "document_url",
-                    document_url: fileId // Or however the API expects the uploaded file reference. 
-                    // Actually Mistral OCR API might take 'document' as { type: "file_id", file_id: ... } or similar.
-                    // Checking docs or assuming standard pattern. 
-                    // Let's assume passing the signed url or checking the specific OCR endpoint docs.
-                    // Wait, usually it's `model`, `document` (url or base64 or id).
-                    // If using the /v1/ocr endpoint with uploaded file, let's try passing the ID if supported, or image url. 
-                    // NOTE: Mistral OCR is very new. If unsure, usage of 'chat/completions' with image url is common. 
-                    // But 'v1/ocr' was mentioned in the user plan.
-                    // Let's update strictly to the plan: "POST /v1/ocr with document.file_id"
-                }
-            })
-        });
-
-        // Correction: The plan says "POST /v1/ocr with document.file_id".
-        // Let's ensure the payload structure matches that expectation.
-
-        // Re-reading Plan: "POST /v1/ocr with document.file_id and model."
-
-        const ocrPayload = {
-            model: MISTRAL_OCR_MODEL,
-            document: {
-                type: "file_id",
-                file_id: fileId
-            }
-        };
-
-        const finalOcrRes = await fetch('https://api.mistral.ai/v1/ocr', {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${MISTRAL_API_KEY}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(ocrPayload)
-        });
-
-
-        if (!finalOcrRes.ok) {
-            const errText = await finalOcrRes.text();
-            throw new Error(`OCR request failed: ${finalOcrRes.status} - ${errText}`);
-        }
-
-        const ocrJson = await finalOcrRes.json();
-
-        // 3. Combine Pages
-        // Assuming ocrJson.pages is an array of objects with 'markdown'
-        let fullText = '';
-        if (ocrJson.pages && Array.isArray(ocrJson.pages)) {
-            fullText = ocrJson.pages.map((p: any) => p.markdown).join('\n\n');
-        }
-
-        result.text = fullText;
-        result.method = 'ocr-mistral';
-        result.usedOcr = true;
-        result.success = true;
-
-    } catch (e: any) {
-        result.attempts.push(`Mistral OCR failed: ${e.message}`);
-        // Don't overwrite result.error if we want to bubble up warnings, but here we failed.
-        // If this was the last resort, we fail.
-    }
+    default:
+      throw new Error(`نوع الملف غير مدعوم: ${fileType}`);
+  }
 }

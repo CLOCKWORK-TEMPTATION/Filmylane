@@ -39,13 +39,15 @@ import {
   IconKeyboard,
   IconHelp,
 } from "@tabler/icons-react";
-import { cn, exportToDocx, exportToPDF, openTextFile } from "@/utils";
+import { cn, exportToDocx, exportToPDF } from "@/utils";
+import {
+  ACCEPTED_FILE_EXTENSIONS,
+  type FileExtractionResponse,
+} from "@/types/file-import";
 import { motion, AnimatePresence } from "motion/react";
-import { FileImportMode, FileExtractionResult } from "@/types/file-import"; // Import types
 import { screenplayFormats } from "@/constants";
 import { EditorArea, EditorHandle } from "./EditorArea";
 import { EditorFooter } from "./EditorFooter";
-import { EditorHeader } from "./EditorHeader";
 import { HoverBorderGradient } from "@/components/ui/hover-border-gradient";
 import { BackgroundRippleEffect } from "@/components/ui/background-ripple-effect";
 import { useToast } from "@/hooks/use-toast";
@@ -207,74 +209,14 @@ export const ScreenplayEditor = () => {
 
   const editorRef = useRef<EditorHandle>(null);
   const preservedSelectionRef = useRef<Range | null>(null);
-  const shortcutActionRef = useRef<(actionId: MenuActionId) => void>(() => { });
+  const shortcutActionRef = useRef<(actionId: MenuActionId) => void>(() => {});
   const { toast } = useToast();
-
-  // File Import Logic
-  const [importer, setImporter] = useState<
-    ((text: string, mode: FileImportMode) => Promise<void>) | null
-  >(null);
-  const openFileInputRef = useRef<HTMLInputElement>(null);
-  const insertFileInputRef = useRef<HTMLInputElement>(null);
-
-  const processFileImport = async (file: File, mode: FileImportMode) => {
-    if (!importer) {
-      toast({ title: "Editor not ready", description: "Please wait..." });
-      return;
-    }
-
-    const formData = new FormData();
-    formData.append("file", file);
-
-    const toastId = toast({
-      title: "Processing file...",
-      description: "Extracting text content (this may take a moment for PDFs/Images)...",
-    });
-
-    try {
-      const res = await fetch("/api/files/extract", {
-        method: "POST",
-        body: formData,
-      });
-
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || "Failed to extract file");
-      }
-
-      const data: FileExtractionResult = await res.json();
-
-      if (data.success && data.text) {
-        await importer(data.text, mode);
-        toast({ title: "Success", description: "File imported successfully." });
-      } else {
-        throw new Error(data.error || "No text extracted");
-      }
-
-    } catch (e: any) {
-      console.error(e);
-      toast({
-        variant: "destructive",
-        title: "Import Failed",
-        description: e.message
-      });
-    }
-  };
-
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>, mode: FileImportMode) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      processFileImport(file, mode);
-    }
-    // Reset input
-    e.target.value = "";
-  };
 
   const toggleMenu = (id: string) => {
     setActiveMenu(activeMenu === id ? null : id);
   };
 
-  const handleContentChange = useCallback(() => { }, []);
+  const handleContentChange = useCallback(() => {}, []);
   const handleStatsChange = useCallback(
     (newStats: DocumentStats) => setStats(newStats),
     []
@@ -416,18 +358,107 @@ export const ScreenplayEditor = () => {
     setActiveMenu(null);
   };
 
-  const handleOpenFile = () => {
-    // Trigger hidden input for OPEN (replace)
-    openFileInputRef.current?.click();
+  /**
+   * فتح ملف واستيراده عبر مسار paste 1:1 (يستبدل المحتوى بالكامل)
+   */
+  const handleOpenFile = async () => {
+    await importFileViaClassifier("replace");
     setActiveMenu(null);
   };
 
-  const handleInsertFile = () => {
-    // Trigger hidden input for INSERT
-    insertFileInputRef.current?.click();
+  /**
+   * إدراج ملف عند موضع المؤشر عبر مسار paste 1:1
+   */
+  const handleInsertFile = async () => {
+    await importFileViaClassifier("insert");
     setActiveMenu(null);
   };
 
+  /**
+   * مسار مشترك: اختيار ملف → استخراج النص → تمريره عبر paste 1:1
+   */
+  const importFileViaClassifier = async (mode: "replace" | "insert") => {
+    const file = await pickFile(ACCEPTED_FILE_EXTENSIONS);
+    if (!file) return;
+
+    toast({
+      title: "جاري الاستخراج",
+      description: `جاري قراءة الملف: ${file.name}...`,
+    });
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const response = await fetch("/api/files/extract", {
+        method: "POST",
+        body: formData,
+      });
+
+      const result: FileExtractionResponse = await response.json();
+
+      if (!result.success || !result.data) {
+        toast({
+          title: "فشل الاستخراج",
+          description: result.error || "حدث خطأ أثناء قراءة الملف",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      const { text, usedOcr, warnings } = result.data;
+
+      if (!text.trim()) {
+        toast({
+          title: "ملف فارغ",
+          description: "لم يتم العثور على نص في الملف المحدد.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // تمرير النص عبر مسار paste 1:1
+      await editorRef.current?.importClassifiedText(text, mode);
+
+      const modeLabel = mode === "replace" ? "تم فتح" : "تم إدراج";
+      let description = `${modeLabel} الملف بنجاح`;
+      if (usedOcr) {
+        description += " (تم استخدام OCR)";
+      }
+      if (warnings.length > 0) {
+        description += `\n⚠️ ${warnings[0]}`;
+      }
+
+      toast({ title: modeLabel, description });
+    } catch (error) {
+      toast({
+        title: "خطأ",
+        description:
+          error instanceof Error
+            ? error.message
+            : "حدث خطأ غير متوقع أثناء استخراج الملف",
+        variant: "destructive",
+      });
+    }
+  };
+
+  /**
+   * فتح مربع اختيار ملف وإرجاع الملف المختار
+   */
+  const pickFile = (accept: string): Promise<File | null> => {
+    return new Promise((resolve) => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = accept;
+      input.onchange = () => {
+        const file = input.files?.[0] ?? null;
+        resolve(file);
+      };
+      // إذا أُلغيَت النافذة
+      input.addEventListener("cancel", () => resolve(null));
+      input.click();
+    });
+  };
 
   const handleSaveFile = () => {
     const content = getEditorContentForExport();
@@ -698,10 +729,10 @@ export const ScreenplayEditor = () => {
         handleNewFile();
         break;
       case "open-file":
-        handleOpenFile();
+        void handleOpenFile();
         break;
       case "insert-file":
-        handleInsertFile();
+        void handleInsertFile();
         break;
       case "save-file":
         handleSaveFile();
@@ -900,6 +931,7 @@ export const ScreenplayEditor = () => {
     ملف: [
       { label: "مستند جديد", icon: IconFilePlus, actionId: "new-file" },
       { label: "فتح...", icon: IconFolderOpen, actionId: "open-file" },
+      { label: "إدراج ملف...", icon: IconUpload, actionId: "insert-file" },
       { label: "حفظ", icon: IconDeviceFloppy, actionId: "save-file" },
       { label: "حفظ باسم...", icon: IconDownload, actionId: "save-as-file" },
       { label: "طباعة", icon: IconPrinter, actionId: "print-file" },
@@ -1088,27 +1120,6 @@ export const ScreenplayEditor = () => {
           </HoverBorderGradient>
         </div>
       </header>
-      {/* Header */}
-      <EditorHeader
-        onOpenFile={handleOpenFile}
-        onInsertFile={handleInsertFile}
-      />
-
-      {/* Hidden File Inputs */}
-      <input
-        type="file"
-        ref={openFileInputRef}
-        className="hidden"
-        accept=".pdf,.doc,.docx,.txt,.fountain,.fdx"
-        onChange={(e) => handleFileSelect(e, "replace")}
-      />
-      <input
-        type="file"
-        ref={insertFileInputRef}
-        className="hidden"
-        accept=".pdf,.doc,.docx,.txt,.fountain,.fdx"
-        onChange={(e) => handleFileSelect(e, "insert")}
-      />
 
       {/* Main Layout */}
       <div className="relative z-10 flex flex-1 overflow-hidden">
@@ -1363,7 +1374,6 @@ export const ScreenplayEditor = () => {
                 font="AzarMehrMonospaced-San"
                 size="12pt"
                 pageCount={stats.pages}
-                onImporterReady={setImporter}
               />
             </motion.div>
           </div>
