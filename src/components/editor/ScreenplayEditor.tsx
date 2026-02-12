@@ -39,7 +39,11 @@ import {
   IconKeyboard,
   IconHelp,
 } from "@tabler/icons-react";
-import { cn, exportToDocx, exportToPDF, openTextFile } from "@/utils";
+import { cn, exportToDocx, exportToPDF } from "@/utils";
+import {
+  ACCEPTED_FILE_EXTENSIONS,
+  type FileExtractionResponse,
+} from "@/types/file-import";
 import { motion, AnimatePresence } from "motion/react";
 import { screenplayFormats } from "@/constants";
 import { EditorArea, EditorHandle } from "./EditorArea";
@@ -165,6 +169,7 @@ const SidebarItem = ({
 type MenuActionId =
   | "new-file"
   | "open-file"
+  | "insert-file"
   | "save-file"
   | "save-as-file"
   | "print-file"
@@ -353,17 +358,106 @@ export const ScreenplayEditor = () => {
     setActiveMenu(null);
   };
 
+  /**
+   * فتح ملف واستيراده عبر مسار paste 1:1 (يستبدل المحتوى بالكامل)
+   */
   const handleOpenFile = async () => {
-    const text = await openTextFile(".txt,.fountain,.fdx");
-    if (text) {
-      const lines = text
-        .split("\n")
-        .map((line) => `<div class="format-action">${line || "<br>"}</div>`)
-        .join("");
-      editorRef.current?.insertContent(lines, "replace");
-      toast({ title: "تم الفتح", description: "تم فتح الملف بنجاح" });
-    }
+    await importFileViaClassifier("replace");
     setActiveMenu(null);
+  };
+
+  /**
+   * إدراج ملف عند موضع المؤشر عبر مسار paste 1:1
+   */
+  const handleInsertFile = async () => {
+    await importFileViaClassifier("insert");
+    setActiveMenu(null);
+  };
+
+  /**
+   * مسار مشترك: اختيار ملف → استخراج النص → تمريره عبر paste 1:1
+   */
+  const importFileViaClassifier = async (mode: "replace" | "insert") => {
+    const file = await pickFile(ACCEPTED_FILE_EXTENSIONS);
+    if (!file) return;
+
+    toast({
+      title: "جاري الاستخراج",
+      description: `جاري قراءة الملف: ${file.name}...`,
+    });
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const response = await fetch("/api/files/extract", {
+        method: "POST",
+        body: formData,
+      });
+
+      const result: FileExtractionResponse = await response.json();
+
+      if (!result.success || !result.data) {
+        toast({
+          title: "فشل الاستخراج",
+          description: result.error || "حدث خطأ أثناء قراءة الملف",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      const { text, usedOcr, warnings } = result.data;
+
+      if (!text.trim()) {
+        toast({
+          title: "ملف فارغ",
+          description: "لم يتم العثور على نص في الملف المحدد.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // تمرير النص عبر مسار paste 1:1
+      await editorRef.current?.importClassifiedText(text, mode);
+
+      const modeLabel = mode === "replace" ? "تم فتح" : "تم إدراج";
+      let description = `${modeLabel} الملف بنجاح`;
+      if (usedOcr) {
+        description += " (تم استخدام OCR)";
+      }
+      if (warnings.length > 0) {
+        description += `\n⚠️ ${warnings[0]}`;
+      }
+
+      toast({ title: modeLabel, description });
+    } catch (error) {
+      toast({
+        title: "خطأ",
+        description:
+          error instanceof Error
+            ? error.message
+            : "حدث خطأ غير متوقع أثناء استخراج الملف",
+        variant: "destructive",
+      });
+    }
+  };
+
+  /**
+   * فتح مربع اختيار ملف وإرجاع الملف المختار
+   */
+  const pickFile = (accept: string): Promise<File | null> => {
+    return new Promise((resolve) => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = accept;
+      input.onchange = () => {
+        const file = input.files?.[0] ?? null;
+        resolve(file);
+      };
+      // إذا أُلغيَت النافذة
+      input.addEventListener("cancel", () => resolve(null));
+      input.click();
+    });
   };
 
   const handleSaveFile = () => {
@@ -637,6 +731,9 @@ export const ScreenplayEditor = () => {
       case "open-file":
         void handleOpenFile();
         break;
+      case "insert-file":
+        void handleInsertFile();
+        break;
       case "save-file":
         handleSaveFile();
         break;
@@ -834,6 +931,7 @@ export const ScreenplayEditor = () => {
     ملف: [
       { label: "مستند جديد", icon: IconFilePlus, actionId: "new-file" },
       { label: "فتح...", icon: IconFolderOpen, actionId: "open-file" },
+      { label: "إدراج ملف...", icon: IconUpload, actionId: "insert-file" },
       { label: "حفظ", icon: IconDeviceFloppy, actionId: "save-file" },
       { label: "حفظ باسم...", icon: IconDownload, actionId: "save-as-file" },
       { label: "طباعة", icon: IconPrinter, actionId: "print-file" },

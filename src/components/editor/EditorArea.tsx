@@ -34,6 +34,11 @@ export interface EditorHandle {
   getAllHtml: () => string;
   selectAllContent: () => void;
   focusEditor: () => void;
+  /** استيراد نص عبر مسار paste 1:1 (يمرر النص كأنه لصق) */
+  importClassifiedText: (
+    text: string,
+    mode: "replace" | "insert"
+  ) => Promise<void>;
 }
 
 interface EditorAreaProps {
@@ -580,6 +585,85 @@ export const EditorArea = forwardRef<EditorHandle, EditorAreaProps>(
         if (bodies.length === 0) return;
         const target = bodies[bodies.length - 1];
         target.focus();
+      },
+      importClassifiedText: async (
+        text: string,
+        mode: "replace" | "insert"
+      ) => {
+        // إنشاء pseudo clipboard event لتمريرها عبر مسار paste 1:1
+        const dataTransfer = new DataTransfer();
+        dataTransfer.setData("text/plain", text);
+
+        const pseudoEvent = {
+          preventDefault: () => {},
+          clipboardData: dataTransfer,
+          // الحقول المطلوبة لـ React.ClipboardEvent
+          nativeEvent: new ClipboardEvent("paste", {
+            clipboardData: dataTransfer,
+          }),
+          currentTarget: containerRef.current,
+          target: containerRef.current,
+          bubbles: true,
+          cancelable: true,
+          defaultPrevented: false,
+          eventPhase: 0,
+          isTrusted: false,
+          timeStamp: Date.now(),
+          type: "paste",
+          stopPropagation: () => {},
+          isDefaultPrevented: () => false,
+          isPropagationStopped: () => false,
+          persist: () => {},
+        } as unknown as React.ClipboardEvent<HTMLDivElement>;
+
+        if (mode === "replace") {
+          // مسح المحتوى أولاً قبل اللصق
+          if (containerRef.current) {
+            const bodies = containerRef.current.querySelectorAll(
+              ".screenplay-sheet__body"
+            );
+            bodies.forEach((b) => (b.innerHTML = ""));
+            if (bodies[0]) {
+              (bodies[0] as HTMLElement).innerHTML =
+                '<div class="format-action"><br></div>';
+              // ضع المؤشر داخل العنصر الجديد
+              const sel = window.getSelection();
+              if (sel) {
+                const range = document.createRange();
+                range.selectNodeContents(bodies[0].firstChild!);
+                range.collapse(true);
+                sel.removeAllRanges();
+                sel.addRange(range);
+              }
+            }
+          }
+        } else {
+          // وضع insert: تأكد من وجود مؤشر في المحرر
+          const bodies = getAllBodies();
+          if (bodies.length > 0) {
+            const lastBody = bodies[bodies.length - 1];
+            lastBody.focus();
+          }
+        }
+
+        // استدعاء handlePaste الحقيقي (مسار 1:1)
+        await newHandlePaste(
+          pseudoEvent,
+          virtualEditorRef,
+          (formatType) => getFormatStyles(formatType, fixedSize, fixedFont),
+          handleInput,
+          memoryManager,
+          undefined,
+          hybridClassifier,
+          feedbackCollector,
+          requestConfirmation,
+          (pasteBatchId, pendingCount) => {
+            setPendingConfirmations((prev) => [
+              ...prev,
+              { pasteBatchId, count: pendingCount },
+            ]);
+          }
+        );
       },
     }));
 
