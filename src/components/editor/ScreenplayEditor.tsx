@@ -41,9 +41,11 @@ import {
 } from "@tabler/icons-react";
 import { cn, exportToDocx, exportToPDF, openTextFile } from "@/utils";
 import { motion, AnimatePresence } from "motion/react";
+import { FileImportMode, FileExtractionResult } from "@/types/file-import"; // Import types
 import { screenplayFormats } from "@/constants";
 import { EditorArea, EditorHandle } from "./EditorArea";
 import { EditorFooter } from "./EditorFooter";
+import { EditorHeader } from "./EditorHeader";
 import { HoverBorderGradient } from "@/components/ui/hover-border-gradient";
 import { BackgroundRippleEffect } from "@/components/ui/background-ripple-effect";
 import { useToast } from "@/hooks/use-toast";
@@ -165,6 +167,7 @@ const SidebarItem = ({
 type MenuActionId =
   | "new-file"
   | "open-file"
+  | "insert-file"
   | "save-file"
   | "save-as-file"
   | "print-file"
@@ -204,14 +207,74 @@ export const ScreenplayEditor = () => {
 
   const editorRef = useRef<EditorHandle>(null);
   const preservedSelectionRef = useRef<Range | null>(null);
-  const shortcutActionRef = useRef<(actionId: MenuActionId) => void>(() => {});
+  const shortcutActionRef = useRef<(actionId: MenuActionId) => void>(() => { });
   const { toast } = useToast();
+
+  // File Import Logic
+  const [importer, setImporter] = useState<
+    ((text: string, mode: FileImportMode) => Promise<void>) | null
+  >(null);
+  const openFileInputRef = useRef<HTMLInputElement>(null);
+  const insertFileInputRef = useRef<HTMLInputElement>(null);
+
+  const processFileImport = async (file: File, mode: FileImportMode) => {
+    if (!importer) {
+      toast({ title: "Editor not ready", description: "Please wait..." });
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const toastId = toast({
+      title: "Processing file...",
+      description: "Extracting text content (this may take a moment for PDFs/Images)...",
+    });
+
+    try {
+      const res = await fetch("/api/files/extract", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Failed to extract file");
+      }
+
+      const data: FileExtractionResult = await res.json();
+
+      if (data.success && data.text) {
+        await importer(data.text, mode);
+        toast({ title: "Success", description: "File imported successfully." });
+      } else {
+        throw new Error(data.error || "No text extracted");
+      }
+
+    } catch (e: any) {
+      console.error(e);
+      toast({
+        variant: "destructive",
+        title: "Import Failed",
+        description: e.message
+      });
+    }
+  };
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>, mode: FileImportMode) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      processFileImport(file, mode);
+    }
+    // Reset input
+    e.target.value = "";
+  };
 
   const toggleMenu = (id: string) => {
     setActiveMenu(activeMenu === id ? null : id);
   };
 
-  const handleContentChange = useCallback(() => {}, []);
+  const handleContentChange = useCallback(() => { }, []);
   const handleStatsChange = useCallback(
     (newStats: DocumentStats) => setStats(newStats),
     []
@@ -353,18 +416,18 @@ export const ScreenplayEditor = () => {
     setActiveMenu(null);
   };
 
-  const handleOpenFile = async () => {
-    const text = await openTextFile(".txt,.fountain,.fdx");
-    if (text) {
-      const lines = text
-        .split("\n")
-        .map((line) => `<div class="format-action">${line || "<br>"}</div>`)
-        .join("");
-      editorRef.current?.insertContent(lines, "replace");
-      toast({ title: "تم الفتح", description: "تم فتح الملف بنجاح" });
-    }
+  const handleOpenFile = () => {
+    // Trigger hidden input for OPEN (replace)
+    openFileInputRef.current?.click();
     setActiveMenu(null);
   };
+
+  const handleInsertFile = () => {
+    // Trigger hidden input for INSERT
+    insertFileInputRef.current?.click();
+    setActiveMenu(null);
+  };
+
 
   const handleSaveFile = () => {
     const content = getEditorContentForExport();
@@ -635,7 +698,10 @@ export const ScreenplayEditor = () => {
         handleNewFile();
         break;
       case "open-file":
-        void handleOpenFile();
+        handleOpenFile();
+        break;
+      case "insert-file":
+        handleInsertFile();
         break;
       case "save-file":
         handleSaveFile();
@@ -1022,6 +1088,27 @@ export const ScreenplayEditor = () => {
           </HoverBorderGradient>
         </div>
       </header>
+      {/* Header */}
+      <EditorHeader
+        onOpenFile={handleOpenFile}
+        onInsertFile={handleInsertFile}
+      />
+
+      {/* Hidden File Inputs */}
+      <input
+        type="file"
+        ref={openFileInputRef}
+        className="hidden"
+        accept=".pdf,.doc,.docx,.txt,.fountain,.fdx"
+        onChange={(e) => handleFileSelect(e, "replace")}
+      />
+      <input
+        type="file"
+        ref={insertFileInputRef}
+        className="hidden"
+        accept=".pdf,.doc,.docx,.txt,.fountain,.fdx"
+        onChange={(e) => handleFileSelect(e, "insert")}
+      />
 
       {/* Main Layout */}
       <div className="relative z-10 flex flex-1 overflow-hidden">
@@ -1276,6 +1363,7 @@ export const ScreenplayEditor = () => {
                 font="AzarMehrMonospaced-San"
                 size="12pt"
                 pageCount={stats.pages}
+                onImporterReady={setImporter}
               />
             </motion.div>
           </div>

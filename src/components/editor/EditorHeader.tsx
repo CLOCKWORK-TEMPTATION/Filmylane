@@ -10,7 +10,12 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
-export function EditorHeader() {
+export interface EditorHeaderProps {
+  onOpenFile?: () => void;
+  onInsertFile?: () => void;
+}
+
+export function EditorHeader({ onOpenFile, onInsertFile }: EditorHeaderProps) {
   return (
     <header className="sticky top-0 z-30 flex items-center justify-between border-b border-white/10 bg-gradient-to-b from-slate-900/90 to-slate-900/70 px-6 py-3 text-white shadow-2xl shadow-black/20 backdrop-blur-xl">
       {/* Logo اليمين: أفان تيتر */}
@@ -35,11 +40,11 @@ export function EditorHeader() {
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-48">
-            <DropdownMenuItem>ملف</DropdownMenuItem>
-            <DropdownMenuItem>تحرير</DropdownMenuItem>
-            <DropdownMenuItem>عرض</DropdownMenuItem>
-            <DropdownMenuItem>أدوات</DropdownMenuItem>
-            <DropdownMenuItem>مساعدة</DropdownMenuItem>
+            <DropdownMenuItem onClick={onOpenFile}>فتح...</DropdownMenuItem>
+            <DropdownMenuItem onClick={onInsertFile}>إدراج ملف...</DropdownMenuItem>
+            <DropdownMenuItem>جديد</DropdownMenuItem>
+            <DropdownMenuItem>حفظ</DropdownMenuItem>
+            <DropdownMenuItem>تصدير</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
 

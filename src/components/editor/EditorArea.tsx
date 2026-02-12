@@ -18,6 +18,7 @@ import {
   HybridClassifier,
   FeedbackCollector,
 } from "@/utils";
+import { FileImportMode } from "@/types/file-import"; // Import this
 import { ClassificationConfirmationDialog } from "./ConfirmationDialog";
 import {
   formatClassMap,
@@ -43,6 +44,9 @@ interface EditorAreaProps {
   font: string;
   size: string;
   pageCount: number;
+  onImporterReady?: (
+    importer: (text: string, mode: FileImportMode) => Promise<void>
+  ) => void;
 }
 
 export const EditorArea = forwardRef<EditorHandle, EditorAreaProps>(
@@ -54,6 +58,7 @@ export const EditorArea = forwardRef<EditorHandle, EditorAreaProps>(
       font: _font,
       size: _size,
       pageCount: _pageCount,
+      onImporterReady,
     },
     ref
   ) => {
@@ -454,6 +459,91 @@ export const EditorArea = forwardRef<EditorHandle, EditorAreaProps>(
         requestConfirmation,
       ]
     );
+
+    const importViaPastePipeline = useCallback(
+      async (text: string) => {
+        const pseudoPasteEvent = {
+          preventDefault: () => {},
+          clipboardData: {
+            getData: (format: string) => (format === "text/plain" ? text : ""),
+          },
+        } as unknown as React.ClipboardEvent<HTMLDivElement>;
+
+        await newHandlePaste(
+          pseudoPasteEvent,
+          virtualEditorRef,
+          (formatType) => getFormatStyles(formatType, fixedSize, fixedFont),
+          handleInput,
+          memoryManager,
+          undefined,
+          hybridClassifier,
+          feedbackCollector,
+          requestConfirmation,
+          (pasteBatchId, pendingCount) => {
+            setPendingConfirmations((prev) => [
+              ...prev,
+              { pasteBatchId, count: pendingCount },
+            ]);
+          }
+        );
+      },
+      [
+        virtualEditorRef,
+        fixedSize,
+        fixedFont,
+        handleInput,
+        memoryManager,
+        hybridClassifier,
+        feedbackCollector,
+        requestConfirmation,
+      ]
+    );
+
+    // --- Import Logic ---
+    const importClassifiedText = useCallback(
+      async (text: string, mode: FileImportMode) => {
+        // Ensure selection and focus are valid before injecting text via paste pipeline.
+
+        if (mode === "replace") {
+          if (containerRef.current) {
+            const bodies = containerRef.current.querySelectorAll(".screenplay-sheet__body");
+            bodies.forEach(b => b.innerHTML = "");
+            // Focus first body
+            (bodies[0] as HTMLElement)?.focus();
+            repaginate();
+          }
+        } else {
+          // INSERT mode
+          // Ensure focus
+          const sel = window.getSelection();
+          if (!sel?.rangeCount) {
+            // Fallback to end of doc if no selection
+            const bodies = getAllBodies();
+            if (bodies.length > 0) {
+              const last = bodies[bodies.length - 1];
+              last.focus();
+              // move cursor to end
+              const range = document.createRange();
+              range.selectNodeContents(last);
+              range.collapse(false);
+              sel?.removeAllRanges();
+              sel?.addRange(range);
+            }
+          }
+        }
+
+        await importViaPastePipeline(text);
+      },
+      [importViaPastePipeline, repaginate]
+    );
+
+    // Expose importer
+    useEffect(() => {
+      if (onImporterReady) {
+        onImporterReady(importClassifiedText);
+      }
+    }, [onImporterReady, importClassifiedText]);
+
 
     const handleRunPendingConfirmations = useCallback(async () => {
       if (pendingConfirmations.length === 0) return;
