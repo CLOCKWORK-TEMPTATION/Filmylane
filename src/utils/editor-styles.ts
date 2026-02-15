@@ -1,5 +1,20 @@
 import React from "react";
 
+export const EDITOR_STYLE_FORMAT_IDS = [
+  "basmala",
+  "scene-header-1",
+  "scene-header-2",
+  "scene-header-3",
+  "action",
+  "character",
+  "dialogue",
+  "parenthetical",
+  "transition",
+  "scene-header-top-line",
+] as const;
+
+export type EditorStyleFormatId = (typeof EDITOR_STYLE_FORMAT_IDS)[number];
+
 /**
  * @function getFormatStyles
  * @description يحصل على الـ CSS styles المناسبة لكل نوع من أنواع التنسيق في السيناريو
@@ -8,7 +23,7 @@ import React from "react";
  * @returns React.CSSProperties - الـ styles المناسبة
  */
 export const getFormatStyles = (
-  formatType: string,
+  formatType: EditorStyleFormatId | string,
   selectedSize: string = "12pt",
   selectedFont: string = "AzarMehrMonospaced-San"
 ): React.CSSProperties => {

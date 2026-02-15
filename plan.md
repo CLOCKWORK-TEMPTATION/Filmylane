@@ -44,7 +44,7 @@ normalize newlines.
 docx:
 mammoth.extractRawText.
 pdf (Hybrid OCR policy):
-محاولة استخراج نص عبر parser محلي (pdf-parse).
+محاولة استخراج نص عبر parser محلي (pdfjs-dist).
 حساب كثافة النص.
 إذا النص فارغ/ضعيف: تشغيل Mistral OCR.
 إذا النص قوي: استخدام النص المحلي مباشرة.
@@ -108,3 +108,38 @@ OCR policy المعتمدة: Hybrid detect+OCR.
 .doc هو أعلى أولوية: سيتم تنفيذ fallback ladder كاملة بدل الفشل المبكر.
 في بيئات لا تحتوي Word COM أو antiword، سيتم تخطي المسار غير المتاح تلقائيًا مع الاستمرار لباقي fallback.
 إذا غاب MISTRAL_API_KEY سيتم الإبقاء على المسارات المحلية، وOCR سيُعطي رسالة إعداد واضحة بدل crash.
+
+---
+
+## Runbook (تحديث التنفيذ الجذري)
+
+### Antiword Build
+1. Windows-first:
+`pnpm run build:antiword:windows`
+2. Linux (WSL) binary:
+`pnpm run build:antiword:linux`
+3. Hybrid wrapper:
+`pnpm run build:antiword`
+
+### DOC extraction fallback order
+1. antiword (نسخة التطبيق المدمجة - Windows `antiword.exe`)
+2. antiword (نسخة التطبيق المدمجة - Linux داخل WSL)
+3. antiword (`/usr/bin/antiword` داخل WSL)
+4. Word COM automation (نص مباشر)
+5. Word COM -> PDF -> Mistral OCR
+
+### PDF extraction policy
+1. محاولة استرجاع payload التطبيق من PDF metadata/hidden marker.
+2. local parser (Node-safe) بدون الاعتماد على worker bundling.
+3. إن كان النص ضعيفًا أو فشل parser: Mistral OCR (Primary في الإنتاج).
+
+### Regression Results (12.doc / 12.docx / 12.pdf)
+| Fixture | Method | Score (formatAgreementScore) | Fallback Used | Pass/Fail |
+| --- | --- | --- | --- | --- |
+| `12.doc` | `antiword (Windows bundled)` | `0.983` | `No` | `PASS` |
+| `12.docx` | `mammoth` + structured block parser | `0.974` | `No` | `PASS` |
+| `12.pdf` | `pdf-local (RTL-aware line reconstruction)` | `0.950` | `No` | `PASS` |
+
+ملاحظات:
+- القياس على baseline: `tests/fixtures/regression/12.paste-baseline.blocks.json`.
+- gate المستهدف تحقق بالكامل: `doc >= 0.95`, `docx >= 0.95`, `pdf >= 0.90`.

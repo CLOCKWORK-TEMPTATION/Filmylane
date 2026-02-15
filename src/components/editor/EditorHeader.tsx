@@ -41,7 +41,9 @@ export function EditorHeader({ onOpenFile, onInsertFile }: EditorHeaderProps) {
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-48">
             <DropdownMenuItem onClick={onOpenFile}>فتح...</DropdownMenuItem>
-            <DropdownMenuItem onClick={onInsertFile}>إدراج ملف...</DropdownMenuItem>
+            <DropdownMenuItem onClick={onInsertFile}>
+              إدراج ملف...
+            </DropdownMenuItem>
             <DropdownMenuItem>جديد</DropdownMenuItem>
             <DropdownMenuItem>حفظ</DropdownMenuItem>
             <DropdownMenuItem>تصدير</DropdownMenuItem>

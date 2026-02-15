@@ -3,6 +3,8 @@
  * تعريف الواجهات والأنواع المستخدمة في مسار فتح/إدراج الملفات
  */
 
+import type { ScreenplayBlock } from "@/utils/document-model";
+
 /** وضع استيراد الملف */
 export type FileImportMode = "replace" | "insert";
 
@@ -20,8 +22,10 @@ export type ExtractionMethod =
   | "native-text"
   | "mammoth"
   | "antiword"
+  | "doc-converter-flow"
   | "word-com"
-  | "ocr-mistral";
+  | "ocr-mistral"
+  | "app-payload";
 
 /** نتيجة استخراج نص من ملف */
 export interface FileExtractionResult {
@@ -37,6 +41,14 @@ export interface FileExtractionResult {
   warnings: string[];
   /** سجل المحاولات */
   attempts: string[];
+  /** مؤشر جودة النص المستخرج (0..1) */
+  qualityScore?: number;
+  /** ما هي خطوات التطبيع المطبقة على النص */
+  normalizationApplied?: string[];
+  /** كتل مستخرجة 1:1 من payload التطبيق إن توفرت */
+  structuredBlocks?: ScreenplayBlock[];
+  /** إصدار payload عند الاسترجاع المباشر */
+  payloadVersion?: number;
 }
 
 /** طلب استخراج ملف للـ API */

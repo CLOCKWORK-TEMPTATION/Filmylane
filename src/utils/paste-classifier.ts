@@ -104,6 +104,7 @@ type AgentAppliedCallback = (meta: {
   latencyMs: number;
 }) => void;
 type AgentSkippedCallback = (reason: string) => void;
+type ImportSource = "clipboard" | "file-import";
 
 const extractPlainTextFromHtmlLikeLine = (line: string): string => {
   const raw = (line ?? "").trim();
@@ -407,7 +408,8 @@ const looksLikeNarrativeActionSyntax = (normalized: string): boolean => {
 const shouldMergeWrappedLines = (
   previousLine: string,
   currentLine: string,
-  previousType?: string
+  previousType?: string,
+  _importSource: ImportSource = "clipboard"
 ): boolean => {
   const prev = previousLine.trim();
   const curr = currentLine.trim();
@@ -418,8 +420,8 @@ const shouldMergeWrappedLines = (
   if (TRANSITION_RE.test(curr) || TRANSITION_RE.test(prev)) return false;
   if (/^[-–—]+\s*/.test(curr)) return false;
 
-  // قاعدة صارمة: لا دمج لسطور الأكشن/الشخصية المستقلة.
-  if (previousType === "action" || previousType === "character") return false;
+  // للشخصية: لا دمج أبدًا.
+  if (previousType === "character") return false;
 
   const currNormalized = normalizeLine(curr);
   if (!currNormalized) return false;
@@ -2077,7 +2079,8 @@ export const handlePaste = async (
     | null = null,
   onAgentWarning: AgentWarningCallback | null = null,
   onAgentApplied: AgentAppliedCallback | null = null,
-  onAgentSkipped: AgentSkippedCallback | null = null
+  onAgentSkipped: AgentSkippedCallback | null = null,
+  importSource: ImportSource = "clipboard"
 ): Promise<void> => {
   e.preventDefault();
 
@@ -2134,7 +2137,7 @@ export const handlePaste = async (
       const currBulletParsed = parseBulletLine(trimmed);
       const currHasInlineSpeaker = Boolean(currBulletParsed.inlineParsed);
 
-      if (lastIndex >= 0) {
+      if (lastIndex >= 0 && importSource === "clipboard") {
         const mergedBrokenCharacter = mergeBrokenCharacterName(
           lines[lastIndex],
           trimmed
@@ -2157,7 +2160,12 @@ export const handlePaste = async (
             : "dialogue";
 
         if (
-          shouldMergeWrappedLines(lines[lastIndex], trimmed, previousTypeGuess)
+          shouldMergeWrappedLines(
+            lines[lastIndex],
+            trimmed,
+            previousTypeGuess,
+            importSource
+          )
         ) {
           if (!currHasInlineSpeaker) {
             lines[lastIndex] = `${lines[lastIndex].trim()} ${trimmed}`;
@@ -2480,6 +2488,7 @@ export const handlePaste = async (
   }
 
   const pasteBatchId = `${sessionId}-${Date.now()}`;
+  const pasteCaretMarkerAttr = `paste-caret-${pasteBatchId}`;
   const resolvedTypes: string[] = collectedItems.map(
     (item) => item.classification
   );
@@ -2582,6 +2591,8 @@ export const handlePaste = async (
     previousFormatClass = formatClass;
   }
 
+  formattedHTML += `<span data-paste-caret="${pasteCaretMarkerAttr}" style="display:inline-block;width:0;height:0;overflow:hidden;">&#8203;</span>`;
+
   let insertedWithNativeUndo: boolean;
   try {
     insertedWithNativeUndo = document.execCommand(
@@ -2608,13 +2619,24 @@ export const handlePaste = async (
     range.insertNode(fragment);
   }
 
-  selection.removeAllRanges();
-
-  const newRange = document.createRange();
-  if (editorRef.current && editorRef.current.lastChild) {
-    newRange.selectNodeContents(editorRef.current.lastChild);
-    newRange.collapse(false);
-    selection.addRange(newRange);
+  const markerFromEditor =
+    editorRef.current &&
+    typeof (editorRef.current as unknown as { querySelector?: unknown })
+      .querySelector === "function"
+      ? (editorRef.current as unknown as ParentNode).querySelector(
+          `[data-paste-caret="${pasteCaretMarkerAttr}"]`
+        )
+      : null;
+  const marker =
+    markerFromEditor ??
+    document.querySelector(`[data-paste-caret="${pasteCaretMarkerAttr}"]`);
+  if (marker && marker.parentNode) {
+    const caretRange = document.createRange();
+    caretRange.setStartAfter(marker);
+    caretRange.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(caretRange);
+    marker.parentNode.removeChild(marker);
   }
 
   updateContentFn();

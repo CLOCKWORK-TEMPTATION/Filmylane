@@ -19,7 +19,8 @@ export {
 } from "./storage";
 
 // Editor Styles
-export { getFormatStyles } from "./editor-styles";
+export { getFormatStyles, EDITOR_STYLE_FORMAT_IDS } from "./editor-styles";
+export type { EditorStyleFormatId } from "./editor-styles";
 
 // Paste Classifier
 export { handlePaste, runPendingPasteConfirmations } from "./paste-classifier";
@@ -70,6 +71,19 @@ export {
   downloadFile,
 } from "./exporters";
 
+// File Import Preprocessing
+export {
+  preprocessImportedTextForClassifier,
+  normalizeDocTextFromAntiword,
+  computeImportedTextQualityScore,
+} from "./file-import-preprocessor";
+
+// File Open Pipeline
+export {
+  buildFileOpenPipelineAction,
+  type FileOpenPipelineAction,
+} from "./file-open-pipeline";
+
 // File Operations
 export {
   saveScreenplay,
@@ -99,3 +113,28 @@ export {
   isImperativeStart,
   hasSentencePunctuation,
 } from "./text-utils";
+
+// Photo Montage Helpers
+export {
+  PHOTO_MONTAGE_LABEL,
+  toPhotoMontageSceneHeaderText,
+  isSceneHeaderOneLine,
+  applyPhotoMontageToSceneHeaderLine,
+} from "./photo-montage";
+
+// Document Model / Payload
+export {
+  SCREENPLAY_PAYLOAD_VERSION,
+  SCREENPLAY_PAYLOAD_TOKEN,
+  buildPayloadMarker,
+  extractEncodedPayloadMarker,
+  encodeScreenplayPayload,
+  decodeScreenplayPayload,
+  extractPayloadFromText,
+  htmlToScreenplayBlocks,
+  screenplayBlocksToHtml,
+  createPayloadFromBlocks,
+  createPayloadFromHtml,
+  ensurePayloadChecksum,
+} from "./document-model";
+export type { ScreenplayBlock, ScreenplayPayloadV1 } from "./document-model";

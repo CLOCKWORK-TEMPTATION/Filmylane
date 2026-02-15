@@ -1,11 +1,11 @@
-declare module 'pdf-parse' {
-    function pdf(dataBuffer: Buffer, options?: Record<string, unknown>): Promise<{
-        numpages: number;
-        numrender: number;
-        info: Record<string, unknown>;
-        metadata: unknown;
-        version: string;
-        text: string;
+declare module "pdfjs-dist/legacy/build/pdf.mjs" {
+  export const getDocument: (options: unknown) => {
+    promise: Promise<{
+      numPages: number;
+      getPage: (
+        pageNumber: number
+      ) => Promise<{ getTextContent: () => Promise<{ items: Array<{ str?: string }> }> }>;
     }>;
-    export = pdf;
+    destroy: () => Promise<void>;
+  };
 }

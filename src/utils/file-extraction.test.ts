@@ -1,257 +1,153 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-/**
- * اختبارات وحدة لاستخراج الملفات
- */
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { extractFileText } from "./file-extraction";
+const {
+  mammothExtractRawTextMock,
+  pdfLoadMock,
+  convertDocBufferToTextMock,
+  runPdfConverterFlowMock,
+} = vi.hoisted(() => ({
+  mammothExtractRawTextMock: vi.fn(),
+  pdfLoadMock: vi.fn(),
+  convertDocBufferToTextMock: vi.fn(),
+  runPdfConverterFlowMock: vi.fn(),
+}));
 
-// Mock mammoth
 vi.mock("mammoth", () => ({
+  extractRawText: mammothExtractRawTextMock,
   default: {
-    extractRawText: vi.fn(),
+    extractRawText: mammothExtractRawTextMock,
   },
-  extractRawText: vi.fn(),
 }));
 
-// Mock pdf-parse
-vi.mock("pdf-parse", () => ({
-  default: vi.fn(),
+vi.mock("pdf-lib", () => ({
+  PDFDocument: {
+    load: pdfLoadMock,
+  },
 }));
 
-// Mock mistral-ocr
-vi.mock("./mistral-ocr", () => ({
-  isMistralConfigured: vi.fn(() => false),
-  extractTextWithMistralOcr: vi.fn(),
+vi.mock("./doc-converter-flow", () => ({
+  convertDocBufferToText: convertDocBufferToTextMock,
 }));
 
-// Mock child_process, fs, os, path for doc extraction
-vi.mock("child_process", () => ({
-  execSync: vi.fn(() => {
-    throw new Error("not available in test");
-  }),
+vi.mock("./pdf-converter-flow-runner", () => ({
+  runPdfConverterFlow: runPdfConverterFlowMock,
 }));
 
-const extractTempScriptPath = (command: string): string | null => {
-  const match = command.match(/python "([^"]+)"/);
-  return match?.[1] ?? null;
-};
+import {
+  buildPayloadMarker,
+  createPayloadFromBlocks,
+  encodeScreenplayPayload,
+} from "./document-model";
+import { extractFileText } from "./file-extraction";
 
 describe("extractFileText", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-  });
-
-  describe("txt extraction", () => {
-    it("should extract UTF-8 text from buffer", async () => {
-      const text = "مرحباً بالعالم\nسطر ثاني";
-      const buffer = Buffer.from(text, "utf-8");
-
-      const result = await extractFileText(buffer, "test.txt", "txt");
-
-      expect(result.text).toBe(text);
-      expect(result.fileType).toBe("txt");
-      expect(result.method).toBe("native-text");
-      expect(result.usedOcr).toBe(false);
+    pdfLoadMock.mockResolvedValue({
+      getSubject: () => null,
+      getKeywords: () => [],
+      getTitle: () => null,
+      getProducer: () => null,
     });
-
-    it("should normalize CRLF to LF", async () => {
-      const text = "سطر أول\r\nسطر ثاني\r\nسطر ثالث";
-      const buffer = Buffer.from(text, "utf-8");
-
-      const result = await extractFileText(buffer, "test.txt", "txt");
-
-      expect(result.text).toBe("سطر أول\nسطر ثاني\nسطر ثالث");
+    runPdfConverterFlowMock.mockResolvedValue({
+      text: "OCR result",
+      warnings: [],
+      attempts: ["pdf-converter-flow"],
+      textOutputPath: "C:\\Temp\\script_output.txt",
+    });
+    convertDocBufferToTextMock.mockResolvedValue({
+      text: "مشهد1\nوصف الحدث",
+      method: "doc-converter-flow",
+      warnings: [],
+      attempts: ["doc-converter-flow"],
     });
   });
 
-  describe("fountain extraction", () => {
-    it("should extract fountain file as plain text", async () => {
-      const text = "INT. مكتب - صباحاً\n\nأحمد يدخل المكتب.";
-      const buffer = Buffer.from(text, "utf-8");
-
-      const result = await extractFileText(buffer, "screenplay.fountain", "fountain");
-
-      expect(result.text).toBe(text);
-      expect(result.fileType).toBe("fountain");
-      expect(result.method).toBe("native-text");
-    });
+  it("extracts txt content", async () => {
+    const result = await extractFileText(
+      Buffer.from("مرحبا\nسطر ثاني"),
+      "a.txt",
+      "txt"
+    );
+    expect(result.method).toBe("native-text");
+    expect(result.text).toContain("مرحبا");
+    expect(result.usedOcr).toBe(false);
   });
 
-  describe("docx extraction", () => {
-    it("should extract text via mammoth and normalize newlines", async () => {
-      const mammoth = await import("mammoth");
-      const extractFn = mammoth.extractRawText ?? (mammoth as any).default?.extractRawText;
-      (extractFn as any).mockResolvedValueOnce({
-        value: "نص مستخرج\rمن docx",
-      });
-
-      const buffer = Buffer.from("fake-docx-content");
-      const result = await extractFileText(buffer, "test.docx", "docx");
-
-      expect(result.text).toBe("نص مستخرج\nمن docx");
-      expect(result.fileType).toBe("docx");
-      expect(result.method).toBe("mammoth");
-      expect(result.usedOcr).toBe(false);
+  it("extracts app payload from docx marker", async () => {
+    const payload = createPayloadFromBlocks([
+      { formatId: "scene-header-1", text: "مشهد 1:" },
+      { formatId: "action", text: "وصف" },
+    ]);
+    const marker = buildPayloadMarker(encodeScreenplayPayload(payload));
+    mammothExtractRawTextMock.mockResolvedValueOnce({
+      value: `محتوى\n${marker}\nنهاية`,
     });
+
+    const result = await extractFileText(Buffer.from("x"), "b.docx", "docx");
+    expect(result.method).toBe("app-payload");
+    expect(result.payloadVersion).toBe(1);
+    expect(result.structuredBlocks?.length).toBe(2);
+    expect(result.structuredBlocks?.[0]?.formatId).toBe("scene-header-1");
   });
 
-  describe("pdf extraction", () => {
-    it("should use local parser when text is sufficient", async () => {
-      const pdfParse = (await import("pdf-parse")).default as any;
-      pdfParse.mockResolvedValueOnce({
-        text: "هذا نص PDF طويل بما يكفي\rليعتبر نصاً قوياً للاستخراج المحلي",
-      });
-
-      const buffer = Buffer.from("fake-pdf");
-      const result = await extractFileText(buffer, "test.pdf", "pdf");
-
-      expect(result.method).toBe("native-text");
-      expect(result.usedOcr).toBe(false);
-      expect(result.text).toContain("\n");
+  it("keeps non-payload docx text raw before classifier stage", async () => {
+    mammothExtractRawTextMock.mockResolvedValueOnce({
+      value: "مشهد1 داخلي - نهار",
     });
 
-    it("should fallback to OCR when text is weak and Mistral configured", async () => {
-      const pdfParse = (await import("pdf-parse")).default as any;
-      pdfParse.mockResolvedValueOnce({ text: "" });
-
-      const { isMistralConfigured, extractTextWithMistralOcr } = await import(
-        "./mistral-ocr"
-      );
-      (isMistralConfigured as any).mockReturnValue(true);
-      (extractTextWithMistralOcr as any).mockResolvedValueOnce(
-        "نص مستخرج عبر OCR"
-      );
-
-      const buffer = Buffer.from("fake-pdf");
-      const result = await extractFileText(buffer, "scan.pdf", "pdf");
-
-      expect(result.method).toBe("ocr-mistral");
-      expect(result.usedOcr).toBe(true);
-      expect(result.text).toBe("نص مستخرج عبر OCR");
-    });
-
-    it("should report warnings when OCR is not configured", async () => {
-      const pdfParse = (await import("pdf-parse")).default as any;
-      pdfParse.mockResolvedValueOnce({ text: "" });
-
-      const { isMistralConfigured } = await import("./mistral-ocr");
-      (isMistralConfigured as any).mockReturnValue(false);
-
-      const buffer = Buffer.from("fake-pdf");
-
-      await expect(
-        extractFileText(buffer, "scan.pdf", "pdf")
-      ).rejects.toThrow("فشل استخراج نص من PDF");
-    });
+    const result = await extractFileText(
+      Buffer.from("docx"),
+      "raw.docx",
+      "docx"
+    );
+    expect(result.method).toBe("mammoth");
+    expect(result.text).toBe("مشهد1 داخلي - نهار");
+    expect(result.structuredBlocks).toBeUndefined();
+    expect(result.normalizationApplied).toBeUndefined();
   });
 
-  describe("doc extraction fallback chain", () => {
-    it("should fallback from antiword to Word COM text extraction", async () => {
-      const { execSync } = await import("child_process");
-      const execSyncMock = vi.mocked(execSync);
+  it("uses pdf-converter-flow TXT output for pdf import", async () => {
+    const result = await extractFileText(Buffer.from("pdf"), "d.pdf", "pdf");
+    expect(result.method).toBe("ocr-mistral");
+    expect(result.usedOcr).toBe(true);
+    expect(result.text).toBe("OCR result");
+    expect(runPdfConverterFlowMock).toHaveBeenCalledWith(
+      expect.any(Buffer),
+      "d.pdf"
+    );
+    expect(result.attempts).toContain("pdf-converter-flow");
+  });
 
-      execSyncMock.mockImplementation((command) => {
-        const cmd = String(command);
+  it("fails with explicit message when pdf-converter-flow fails", async () => {
+    runPdfConverterFlowMock.mockRejectedValueOnce(
+      new Error("فشل تحويل ملف PDF عبر pdf-converter-flow")
+    );
 
-        if (cmd.includes("wsl /usr/bin/antiword")) {
-          throw new Error("antiword unavailable");
-        }
+    await expect(
+      extractFileText(Buffer.from("pdf"), "e.pdf", "pdf")
+    ).rejects.toThrow("فشل استخراج نص من PDF");
+  });
 
-        if (cmd.includes("antiword-build/antiword")) {
-          throw new Error("custom antiword unavailable");
-        }
+  it("uses doc-converter-flow as the only doc extraction path", async () => {
+    const result = await extractFileText(Buffer.from("doc"), "f.doc", "doc");
+    expect(result.method).toBe("doc-converter-flow");
+    expect(result.usedOcr).toBe(false);
+    expect(result.attempts).toEqual(["doc-converter-flow"]);
+    expect(convertDocBufferToTextMock).toHaveBeenCalledTimes(1);
+    expect(convertDocBufferToTextMock).toHaveBeenCalledWith(
+      expect.any(Buffer),
+      "f.doc"
+    );
+  });
 
-        if (cmd.includes("extract_doc.py")) {
-          return "Text from Word COM\rSecond paragraph";
-        }
+  it("fails explicitly when doc-converter-flow fails", async () => {
+    convertDocBufferToTextMock.mockRejectedValueOnce(
+      new Error("فشل تحويل ملف .doc عبر doc-converter-flow")
+    );
 
-        throw new Error(`Unexpected command: ${cmd}`);
-      });
-
-      const buffer = Buffer.from("fake-doc");
-      const result = await extractFileText(buffer, "test.doc", "doc");
-
-      expect(result.text).toBe("Text from Word COM\nSecond paragraph");
-      expect(result.method).toBe("word-com");
-      expect(result.usedOcr).toBe(false);
-      expect(result.attempts).toEqual([
-        "antiword (WSL /usr/bin/antiword)",
-        "antiword (مسار مخصص: D:\\aanalyze script\\antiword-build\\antiword)",
-        "Word COM automation (نص مباشر)",
-      ]);
-    });
-
-    it("should fallback to Word COM PDF conversion then OCR when text extraction fails", async () => {
-      const { execSync } = await import("child_process");
-      const execSyncMock = vi.mocked(execSync);
-      const { dirname, join } = await import("path");
-      const { writeFileSync } = await import("fs");
-      const { isMistralConfigured, extractTextWithMistralOcr } = await import(
-        "./mistral-ocr"
-      );
-
-      vi.mocked(isMistralConfigured).mockReturnValue(true);
-      vi.mocked(extractTextWithMistralOcr).mockResolvedValue(
-        "OCR text from converted PDF"
-      );
-
-      execSyncMock.mockImplementation((command) => {
-        const cmd = String(command);
-
-        if (
-          cmd.includes("wsl /usr/bin/antiword") ||
-          cmd.includes("antiword-build/antiword")
-        ) {
-          throw new Error("antiword failed");
-        }
-
-        if (cmd.includes("extract_doc.py")) {
-          throw new Error("Word COM text failed");
-        }
-
-        if (cmd.includes("convert_to_pdf.py")) {
-          const scriptPath = extractTempScriptPath(cmd);
-          if (!scriptPath) {
-            throw new Error("failed to parse convert script path");
-          }
-          const tempDir = dirname(scriptPath);
-          const pdfPath = join(tempDir, "converted.pdf");
-          writeFileSync(pdfPath, Buffer.from("fake-pdf-content"));
-          return "OK";
-        }
-
-        throw new Error(`Unexpected command: ${cmd}`);
-      });
-
-      const result = await extractFileText(Buffer.from("fake-doc"), "test.doc", "doc");
-
-      expect(result.method).toBe("ocr-mistral");
-      expect(result.usedOcr).toBe(true);
-      expect(result.text).toBe("OCR text from converted PDF");
-      expect(result.attempts).toEqual([
-        "antiword (WSL /usr/bin/antiword)",
-        "antiword (مسار مخصص: D:\\aanalyze script\\antiword-build\\antiword)",
-        "Word COM automation (نص مباشر)",
-        "Word COM → PDF → OCR",
-      ]);
-      expect(extractTextWithMistralOcr).toHaveBeenCalledTimes(1);
-    });
-
-    it("should throw detailed error when all fallbacks fail", async () => {
-      const { execSync } = await import("child_process");
-      vi.mocked(execSync).mockImplementation(() => {
-        throw new Error("not available in test");
-      });
-
-      const { isMistralConfigured } = await import("./mistral-ocr");
-      vi.mocked(isMistralConfigured).mockReturnValue(false);
-
-      const buffer = Buffer.from("fake-doc");
-
-      await expect(
-        extractFileText(buffer, "test.doc", "doc")
-      ).rejects.toThrow(/فشل استخراج نص من ملف .doc/);
-    });
+    await expect(
+      extractFileText(Buffer.from("doc"), "broken.doc", "doc")
+    ).rejects.toThrow("فشل تحويل ملف .doc عبر doc-converter-flow");
   });
 });

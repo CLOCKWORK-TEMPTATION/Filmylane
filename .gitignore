@@ -47,3 +47,4 @@ firestore-debug.log
 # IDE and documentation
 .idx/
 docs/
+.tools/

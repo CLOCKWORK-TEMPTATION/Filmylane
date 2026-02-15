@@ -5,10 +5,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { extractFileText } from "@/utils/file-extraction";
-import {
-  getFileType,
-  type FileExtractionResponse,
-} from "@/types/file-import";
+import { getFileType, type FileExtractionResponse } from "@/types/file-import";
 
 export const runtime = "nodejs";
 
@@ -49,10 +46,21 @@ export async function POST(
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "حدث خطأ غير متوقع";
+    const stack = error instanceof Error ? error.stack : undefined;
+    const isExtractionFailure =
+      /فشل استخراج نص|فشل تحويل ملف \.doc|MISTRAL_API_KEY|antiword|doc-converter-flow|Word COM|OCR|mammoth|pdf/i.test(
+        message
+      );
+
+    // eslint-disable-next-line no-console
+    console.error("[api/files/extract] extraction failed", {
+      message,
+      stack,
+    });
 
     return NextResponse.json(
       { success: false, error: message },
-      { status: 500 }
+      { status: isExtractionFailure ? 422 : 500 }
     );
   }
 }

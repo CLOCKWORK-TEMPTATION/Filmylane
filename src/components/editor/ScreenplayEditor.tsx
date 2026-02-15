@@ -31,21 +31,28 @@ import {
   IconClipboard,
   IconScissors,
   IconSelect,
-  IconTextCaption,
-  IconSeparator,
   IconWand,
   IconFileExport,
   IconPrinter,
   IconKeyboard,
   IconHelp,
 } from "@tabler/icons-react";
-import { cn, exportToDocx, exportToPDF } from "@/utils";
+import {
+  applyPhotoMontageToSceneHeaderLine,
+  buildFileOpenPipelineAction,
+  cn,
+  EDITOR_STYLE_FORMAT_IDS,
+  exportToDocx,
+  exportToPDF,
+  logger,
+  type EditorStyleFormatId,
+} from "@/utils";
 import {
   ACCEPTED_FILE_EXTENSIONS,
   type FileExtractionResponse,
 } from "@/types/file-import";
 import { motion, AnimatePresence } from "motion/react";
-import { screenplayFormats } from "@/constants";
+import { insertMenuDefinitions, screenplayFormats } from "@/constants";
 import { EditorArea, EditorHandle } from "./EditorArea";
 import { EditorFooter } from "./EditorFooter";
 import { HoverBorderGradient } from "@/components/ui/hover-border-gradient";
@@ -180,11 +187,6 @@ type MenuActionId =
   | "copy"
   | "paste"
   | "select-all"
-  | "insert-scene-header"
-  | "insert-character"
-  | "insert-dialogue"
-  | "insert-action"
-  | "insert-transition"
   | "bold"
   | "italic"
   | "align-right"
@@ -194,7 +196,23 @@ type MenuActionId =
   | "script-analysis"
   | "ai-suggestions"
   | "show-help"
-  | "about";
+  | "about"
+  | `insert-format:${EditorStyleFormatId}`;
+
+const INSERT_ACTION_PREFIX = "insert-format:" as const;
+const INSERT_FORMAT_SET = new Set<string>(EDITOR_STYLE_FORMAT_IDS);
+
+const toInsertActionId = (
+  formatId: EditorStyleFormatId
+): `insert-format:${EditorStyleFormatId}` =>
+  `${INSERT_ACTION_PREFIX}${formatId}`;
+
+const parseInsertActionId = (actionId: string): EditorStyleFormatId | null => {
+  if (!actionId.startsWith(INSERT_ACTION_PREFIX)) return null;
+  const rawId = actionId.slice(INSERT_ACTION_PREFIX.length);
+  if (!INSERT_FORMAT_SET.has(rawId)) return null;
+  return rawId as EditorStyleFormatId;
+};
 
 export const ScreenplayEditor = () => {
   const [activeMenu, setActiveMenu] = useState<string | null>(null);
@@ -247,6 +265,19 @@ export const ScreenplayEditor = () => {
       return null;
     }
     return htmlContent;
+  }, [toast]);
+
+  const getEditorBlocksForExport = useCallback(() => {
+    const blocks = editorRef.current?.exportStructuredBlocks() ?? [];
+    if (blocks.length === 0) {
+      toast({
+        title: "خطأ",
+        description: "لا يوجد محتوى للحفظ أو الطباعة. اكتب شيئاً أولاً.",
+        variant: "destructive",
+      });
+      return null;
+    }
+    return blocks;
   }, [toast]);
 
   const captureEditorSelection = useCallback(() => {
@@ -315,6 +346,53 @@ export const ScreenplayEditor = () => {
     captureEditorSelection();
     return true;
   }, [captureEditorSelection, isSelectionInsideEditor, restoreEditorSelection]);
+
+  const getCurrentEditorLineElement = useCallback((): HTMLDivElement | null => {
+    const editorElement = editorRef.current?.getElement();
+    const selection = window.getSelection();
+    if (!editorElement || !selection || selection.rangeCount === 0) {
+      return null;
+    }
+
+    const range = selection.getRangeAt(0);
+    if (!editorElement.contains(range.startContainer)) {
+      return null;
+    }
+
+    const node: Node | null = range.startContainer;
+    let element: HTMLElement | null =
+      node.nodeType === Node.ELEMENT_NODE
+        ? (node as HTMLElement)
+        : node.parentElement;
+
+    while (element && element !== editorElement) {
+      if (
+        element.tagName === "DIV" &&
+        element.parentElement?.classList.contains("screenplay-sheet__body")
+      ) {
+        return element as HTMLDivElement;
+      }
+      element = element.parentElement;
+    }
+
+    return null;
+  }, []);
+
+  const placeCursorAtEndOfNode = useCallback((element: HTMLElement) => {
+    const selection = window.getSelection();
+    if (!selection) return;
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }, []);
+
+  const notifyEditorInput = useCallback((lineElement: HTMLElement) => {
+    const body = lineElement.closest(".screenplay-sheet__body");
+    if (!body) return;
+    body.dispatchEvent(new Event("input", { bubbles: true }));
+  }, []);
 
   const executeEditorCommand = useCallback(
     (command: string, value?: string) => {
@@ -395,41 +473,42 @@ export const ScreenplayEditor = () => {
         body: formData,
       });
 
-      const result: FileExtractionResponse = await response.json();
+      let result: FileExtractionResponse | null = null;
+      let fallbackResponseText = "";
 
-      if (!result.success || !result.data) {
+      try {
+        result = (await response.json()) as FileExtractionResponse;
+      } catch {
+        fallbackResponseText = await response.text().catch(() => "");
+      }
+
+      if (!response.ok || !result?.success || !result.data) {
+        const statusLabel = `(${response.status})`;
         toast({
           title: "فشل الاستخراج",
-          description: result.error || "حدث خطأ أثناء قراءة الملف",
+          description:
+            result?.error ||
+            fallbackResponseText ||
+            `حدث خطأ أثناء قراءة الملف ${statusLabel}`,
           variant: "destructive",
         });
         return;
       }
 
-      const { text, usedOcr, warnings } = result.data;
+      const pipelineAction = buildFileOpenPipelineAction(result.data, mode);
+      logger.info("open_pipeline=classifier", {
+        component: "FileOpen",
+        action: mode,
+        data: pipelineAction.telemetry,
+      });
 
-      if (!text.trim()) {
-        toast({
-          title: "ملف فارغ",
-          description: "لم يتم العثور على نص في الملف المحدد.",
-          variant: "destructive",
-        });
+      if (pipelineAction.kind === "reject") {
+        toast(pipelineAction.toast);
         return;
       }
 
-      // تمرير النص عبر مسار paste 1:1
-      await editorRef.current?.importClassifiedText(text, mode);
-
-      const modeLabel = mode === "replace" ? "تم فتح" : "تم إدراج";
-      let description = `${modeLabel} الملف بنجاح`;
-      if (usedOcr) {
-        description += " (تم استخدام OCR)";
-      }
-      if (warnings.length > 0) {
-        description += `\n⚠️ ${warnings[0]}`;
-      }
-
-      toast({ title: modeLabel, description });
+      await editorRef.current?.importClassifiedText(pipelineAction.text, mode);
+      toast(pipelineAction.toast);
     } catch (error) {
       toast({
         title: "خطأ",
@@ -460,24 +539,46 @@ export const ScreenplayEditor = () => {
     });
   };
 
-  const handleSaveFile = () => {
+  const handleSaveFile = async () => {
     const content = getEditorContentForExport();
     if (!content) {
       setActiveMenu(null);
       return;
     }
+    const blocks = getEditorBlocksForExport();
+    if (!blocks) {
+      setActiveMenu(null);
+      return;
+    }
 
-    exportToDocx(content, "screenplay.docx");
-    toast({
-      title: "تم الحفظ",
-      description: "تم حفظ الملف بصيغة DOCX مع التنسيق",
-    });
+    try {
+      await exportToDocx(content, "screenplay.docx", { blocks });
+      toast({
+        title: "تم الحفظ",
+        description: "تم حفظ الملف بصيغة DOCX مع التنسيق",
+      });
+    } catch (error) {
+      toast({
+        title: "فشل الحفظ",
+        description:
+          error instanceof Error
+            ? error.message
+            : "حدث خطأ أثناء إنشاء ملف DOCX.",
+        variant: "destructive",
+      });
+    }
+
     setActiveMenu(null);
   };
 
-  const handleSaveAsFile = () => {
+  const handleSaveAsFile = async () => {
     const content = getEditorContentForExport();
     if (!content) {
+      setActiveMenu(null);
+      return;
+    }
+    const blocks = getEditorBlocksForExport();
+    if (!blocks) {
       setActiveMenu(null);
       return;
     }
@@ -499,11 +600,23 @@ export const ScreenplayEditor = () => {
       return;
     }
 
-    exportToDocx(content, filename);
-    toast({
-      title: "تم الحفظ باسم",
-      description: `تم حفظ الملف: ${filename}`,
-    });
+    try {
+      await exportToDocx(content, filename, { blocks });
+      toast({
+        title: "تم الحفظ باسم",
+        description: `تم حفظ الملف: ${filename}`,
+      });
+    } catch (error) {
+      toast({
+        title: "فشل الحفظ",
+        description:
+          error instanceof Error
+            ? error.message
+            : "حدث خطأ أثناء إنشاء ملف DOCX.",
+        variant: "destructive",
+      });
+    }
+
     setActiveMenu(null);
   };
 
@@ -513,9 +626,14 @@ export const ScreenplayEditor = () => {
       setActiveMenu(null);
       return;
     }
+    const blocks = getEditorBlocksForExport();
+    if (!blocks) {
+      setActiveMenu(null);
+      return;
+    }
 
-    toast({ title: "جاري الطباعة", description: "جاري فتح نافذة الطباعة..." });
-    await exportToPDF(content, "سيناريو");
+    toast({ title: "جاري الطباعة", description: "جاري تجهيز PDF للطباعة..." });
+    await exportToPDF(content, "سيناريو", { openAfterExport: true, blocks });
     setActiveMenu(null);
   };
 
@@ -524,28 +642,46 @@ export const ScreenplayEditor = () => {
     if (!content) {
       return;
     }
+    const blocks = getEditorBlocksForExport();
+    if (!blocks) {
+      return;
+    }
 
-    toast({ title: "جاري التصدير", description: "جاري فتح نافذة الطباعة..." });
+    toast({ title: "جاري التصدير", description: "جاري إنشاء PDF..." });
 
-    // Use the unified exportToPDF with Arabic RTL support
-    await exportToPDF(content, "سيناريو");
+    await exportToPDF(content, "سيناريو", { blocks });
 
     setActiveMenu(null);
   };
 
   // ============ EDIT OPERATIONS ============
   const handleUndo = () => {
-    executeEditorCommand("undo");
+    ensureEditorFocus();
+    const handled = editorRef.current?.undoCommandOperation() ?? false;
+    if (!handled) {
+      executeEditorCommand("undo");
+    } else {
+      captureEditorSelection();
+    }
     setActiveMenu(null);
   };
 
   const handleRedo = () => {
-    executeEditorCommand("redo");
+    ensureEditorFocus();
+    const handled = editorRef.current?.redoCommandOperation() ?? false;
+    if (!handled) {
+      executeEditorCommand("redo");
+    } else {
+      captureEditorSelection();
+    }
     setActiveMenu(null);
   };
 
-  const handleCopy = () => {
-    if (!hasNonCollapsedSelectionInEditor()) {
+  const handleCopy = async () => {
+    ensureEditorFocus();
+    if (
+      !(editorRef.current?.hasSelection() || hasNonCollapsedSelectionInEditor())
+    ) {
       toast({
         title: "لا يوجد تحديد",
         description: "حدد نصًا داخل المحرر أولاً.",
@@ -554,13 +690,27 @@ export const ScreenplayEditor = () => {
       setActiveMenu(null);
       return;
     }
-    executeEditorCommand("copy");
-    toast({ title: "تم النسخ", description: "تم نسخ النص المحدد" });
+
+    const copied = await editorRef.current?.copySelectionToClipboard();
+    if (!copied) {
+      toast({
+        title: "فشل النسخ",
+        description: "تعذر النسخ إلى الحافظة. تحقق من صلاحيات المتصفح.",
+        variant: "destructive",
+      });
+      setActiveMenu(null);
+      return;
+    }
+
+    toast({ title: "تم النسخ", description: "تم نسخ النص المحدد بالكامل" });
     setActiveMenu(null);
   };
 
-  const handleCut = () => {
-    if (!hasNonCollapsedSelectionInEditor()) {
+  const handleCut = async () => {
+    ensureEditorFocus();
+    if (
+      !(editorRef.current?.hasSelection() || hasNonCollapsedSelectionInEditor())
+    ) {
       toast({
         title: "لا يوجد تحديد",
         description: "حدد نصًا داخل المحرر أولاً.",
@@ -569,16 +719,31 @@ export const ScreenplayEditor = () => {
       setActiveMenu(null);
       return;
     }
-    executeEditorCommand("cut");
-    toast({ title: "تم القص", description: "تم قص النص المحدد" });
+
+    const cut = await editorRef.current?.cutSelectionToClipboard();
+    if (!cut) {
+      toast({
+        title: "فشل القص",
+        description:
+          "تعذر الوصول للحافظة، لذلك لم يتم حذف أي نص للحفاظ على البيانات.",
+        variant: "destructive",
+      });
+      setActiveMenu(null);
+      return;
+    }
+
+    toast({ title: "تم القص", description: "تم قص كل النص المحدد" });
     setActiveMenu(null);
   };
 
   const handlePaste = async () => {
+    captureEditorSelection();
     ensureEditorFocus();
     try {
       const text = await navigator.clipboard.readText();
-      executeEditorCommand("insertText", text);
+      ensureEditorFocus();
+      await editorRef.current?.pastePlainTextWithClassifier(text);
+      captureEditorSelection();
       toast({ title: "تم اللصق", description: "تم لصق النص بنجاح" });
     } catch {
       toast({
@@ -592,6 +757,7 @@ export const ScreenplayEditor = () => {
 
   const handleSelectAll = () => {
     editorRef.current?.selectAllContent();
+    captureEditorSelection();
     setActiveMenu(null);
   };
 
@@ -617,45 +783,54 @@ export const ScreenplayEditor = () => {
   };
 
   // ============ INSERT OPERATIONS ============
-  const handleInsertSceneHeader = () => {
-    editorRef.current?.insertContent(
-      '<div class="format-scene-header-1">INT. المكان - الوقت</div>',
-      "insert"
-    );
-    setActiveMenu(null);
-  };
+  const handleInsertByFormatId = useCallback(
+    (formatId: EditorStyleFormatId) => {
+      ensureEditorFocus();
+      const definition = insertMenuDefinitions.find(
+        (item) => item.id === formatId
+      );
+      if (!definition) return;
 
-  const handleInsertCharacter = () => {
-    editorRef.current?.insertContent(
-      '<div class="format-character">اسم الشخصية</div>',
-      "insert"
-    );
-    setActiveMenu(null);
-  };
+      if (definition.insertBehavior === "photo-montage") {
+        const currentLine = getCurrentEditorLineElement();
+        if (!currentLine || !applyPhotoMontageToSceneHeaderLine(currentLine)) {
+          toast({
+            title: "تعذر إدراج فوتو مونتاج",
+            description: "ضع المؤشر داخل رأس المشهد (1) أولًا.",
+            variant: "destructive",
+          });
+          setActiveMenu(null);
+          return;
+        }
 
-  const handleInsertDialogue = () => {
-    editorRef.current?.insertContent(
-      '<div class="format-dialogue">الحوار هنا...</div>',
-      "insert"
-    );
-    setActiveMenu(null);
-  };
+        notifyEditorInput(currentLine);
+        placeCursorAtEndOfNode(currentLine);
+        captureEditorSelection();
+        setActiveMenu(null);
+        return;
+      }
 
-  const handleInsertAction = () => {
-    editorRef.current?.insertContent(
-      '<div class="format-action">وصف الحدث...</div>',
-      "insert"
-    );
-    setActiveMenu(null);
-  };
+      if (!definition.defaultTemplate) {
+        setActiveMenu(null);
+        return;
+      }
 
-  const handleInsertTransition = () => {
-    editorRef.current?.insertContent(
-      '<div class="format-transition">قطع إلى:</div>',
-      "insert"
-    );
-    setActiveMenu(null);
-  };
+      editorRef.current?.insertContent(
+        `<div class="format-${definition.id}">${definition.defaultTemplate}</div>`,
+        "insert"
+      );
+      captureEditorSelection();
+      setActiveMenu(null);
+    },
+    [
+      captureEditorSelection,
+      ensureEditorFocus,
+      getCurrentEditorLineElement,
+      notifyEditorInput,
+      placeCursorAtEndOfNode,
+      toast,
+    ]
+  );
 
   // ============ TOOLS ============
   const handleSpellCheck = () => {
@@ -724,6 +899,12 @@ export const ScreenplayEditor = () => {
   };
 
   const handleMenuAction = (actionId: MenuActionId) => {
+    const insertFormatId = parseInsertActionId(actionId);
+    if (insertFormatId) {
+      handleInsertByFormatId(insertFormatId);
+      return;
+    }
+
     switch (actionId) {
       case "new-file":
         handleNewFile();
@@ -735,10 +916,10 @@ export const ScreenplayEditor = () => {
         void handleInsertFile();
         break;
       case "save-file":
-        handleSaveFile();
+        void handleSaveFile();
         break;
       case "save-as-file":
-        handleSaveAsFile();
+        void handleSaveAsFile();
         break;
       case "print-file":
         void handlePrintFile();
@@ -753,31 +934,16 @@ export const ScreenplayEditor = () => {
         handleRedo();
         break;
       case "cut":
-        handleCut();
+        void handleCut();
         break;
       case "copy":
-        handleCopy();
+        void handleCopy();
         break;
       case "paste":
         void handlePaste();
         break;
       case "select-all":
         handleSelectAll();
-        break;
-      case "insert-scene-header":
-        handleInsertSceneHeader();
-        break;
-      case "insert-character":
-        handleInsertCharacter();
-        break;
-      case "insert-dialogue":
-        handleInsertDialogue();
-        break;
-      case "insert-action":
-        handleInsertAction();
-        break;
-      case "insert-transition":
-        handleInsertTransition();
         break;
       case "bold":
         handleBold();
@@ -914,6 +1080,13 @@ export const ScreenplayEditor = () => {
         if (!inEditorContext) return;
         e.preventDefault();
         runAction("copy");
+        return;
+      }
+
+      if (key === "v") {
+        if (!inEditorContext) return;
+        e.preventDefault();
+        runAction("paste");
       }
     };
 
@@ -945,17 +1118,11 @@ export const ScreenplayEditor = () => {
       { label: "لصق", icon: IconClipboard, actionId: "paste" },
       { label: "تحديد الكل", icon: IconSelect, actionId: "select-all" },
     ],
-    إدراج: [
-      {
-        label: "عنوان مشهد",
-        icon: IconTextCaption,
-        actionId: "insert-scene-header",
-      },
-      { label: "شخصية", icon: IconUser, actionId: "insert-character" },
-      { label: "حوار", icon: IconMessage, actionId: "insert-dialogue" },
-      { label: "حدث", icon: IconTextCaption, actionId: "insert-action" },
-      { label: "انتقال", icon: IconSeparator, actionId: "insert-transition" },
-    ],
+    إدراج: insertMenuDefinitions.map((item) => ({
+      label: item.label,
+      icon: item.icon,
+      actionId: toInsertActionId(item.id),
+    })),
     تنسيق: [
       { label: "غامق", icon: IconBold, actionId: "bold" },
       { label: "مائل", icon: IconItalic, actionId: "italic" },
@@ -1301,7 +1468,7 @@ export const ScreenplayEditor = () => {
                 <DockIcon
                   icon={IconDeviceFloppy}
                   onMouseDown={handlePreserveSelectionMouseDown}
-                  onClick={handleSaveFile}
+                  onClick={() => void handleSaveFile()}
                 />
 
                 <div className="mx-2 mb-4 h-5 w-[1px] bg-gradient-to-b from-transparent via-neutral-600/50 to-transparent" />
