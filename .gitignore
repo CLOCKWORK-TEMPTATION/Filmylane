@@ -48,3 +48,12 @@ firestore-debug.log
 .idx/
 docs/
 .tools/
+.modified
+
+# local artifacts
+.vscode/
+dev-start.log
+dev-start.err
+website-preview.png
+nul
+*.zip
